@@ -381,10 +381,13 @@ impl Supervisor {
 /// A shared note any agent can read or append.
 ///
 /// Stored as a world resource, so tools and systems reach it by type without
-/// knowing which entity wrote it.
+/// knowing which entity wrote it. The retained notes can be bounded with
+/// [`Blackboard::with_retention`] so a long-running world does not accumulate
+/// notes without limit.
 #[derive(Clone, Debug, Default)]
 pub struct Blackboard {
     notes: Vec<Note>,
+    retention: usize,
 }
 
 /// One line on a [`Blackboard`].
@@ -402,12 +405,23 @@ impl Blackboard {
         Self::default()
     }
 
+    /// Keep at most `limit` recent notes; `0` (the default) means unlimited.
+    /// Older notes are dropped as new ones are posted.
+    pub fn with_retention(mut self, limit: usize) -> Self {
+        self.retention = limit;
+        self
+    }
+
     /// Append a note.
     pub fn post(&mut self, author: impl Into<String>, text: impl Into<String>) -> &mut Self {
         self.notes.push(Note {
             author: author.into(),
             text: text.into(),
         });
+        if self.retention > 0 && self.notes.len() > self.retention {
+            let excess = self.notes.len() - self.retention;
+            self.notes.drain(..excess);
+        }
         self
     }
 
@@ -1045,6 +1059,21 @@ mod tests {
         assert_eq!(board.by("ops").len(), 1);
         assert!(board.render().starts_with("scribe:"));
         assert!(board.render().contains("ops: deploy is frozen"));
+    }
+
+    #[test]
+    fn blackboard_retention_bounds_the_notes() {
+        let mut board = Blackboard::new().with_retention(2);
+        for index in 0..5 {
+            board.post("scribe", format!("note {index}"));
+        }
+        assert_eq!(board.len(), 2, "only the most recent notes are retained");
+        assert!(board.render().contains("note 4"));
+        assert!(
+            !board.render().contains("note 0"),
+            "the oldest notes are dropped: {}",
+            board.render()
+        );
     }
 
     #[test]

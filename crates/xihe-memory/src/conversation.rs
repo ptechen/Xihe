@@ -299,17 +299,20 @@ impl ConversationWindow {
         }
     }
 
-    /// Apply whichever budget is tighter.
+    /// Apply both budgets, keeping the newest turns. The turn ceiling is
+    /// enforced first, then the token ceiling, so a push that breaches both
+    /// cannot leave the prompt over its token budget.
     pub fn enforce_budget(&mut self) -> TrimReason {
+        let mut reason = TrimReason::None;
         if self.turns.len() > self.max_turns {
             self.trim_to_turns();
-            return TrimReason::TooManyTurns;
+            reason = TrimReason::TooManyTurns;
         }
         if self.tokens() > self.max_tokens {
             self.trim_to_tokens();
-            return TrimReason::TooManyTokens;
+            reason = TrimReason::TooManyTokens;
         }
-        TrimReason::None
+        reason
     }
 
     /// Fold the oldest turns into the summary so far, keeping at least
@@ -336,6 +339,9 @@ impl ConversationWindow {
         for turn in &stale {
             let speaker = turn.author.as_deref().unwrap_or(turn.speaker.as_str());
             transcript.push_str(&format!("{speaker}: {}\n", turn.content));
+            for call in &turn.tool_calls {
+                transcript.push_str(&format!("{speaker} called {}\n", call.render()));
+            }
         }
         let summary = summariser.summarise(&transcript).await?;
         let summary = clamp_chars(&summary, self.summary_max_chars);
@@ -457,6 +463,7 @@ impl SessionMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use crate::reflection::HeuristicSummariser;
 
     fn dialogue(window: &mut ConversationWindow, rounds: usize) {
@@ -526,6 +533,26 @@ mod tests {
     }
 
     #[test]
+    fn a_push_enforces_both_ceilings_after_reconfiguration() {
+        let mut window = ConversationWindow::new()
+            .with_max_turns(100)
+            .with_max_tokens(10_000);
+        for index in 0..6 {
+            window.push_user(format!("question {index} {}", "pad".repeat(10)));
+        }
+        // Tighten both ceilings below the current state, then push once more so
+        // the real push path runs enforce_budget.
+        window = window.with_max_turns(4).with_max_tokens(40);
+        window.push_user("one more");
+        assert!(window.turns().len() <= 4, "the turn ceiling holds");
+        assert!(
+            window.tokens() <= 40,
+            "the token ceiling must hold too, not just the turn count: {}",
+            window.tokens()
+        );
+    }
+
+    #[test]
     fn prompts_render_system_summary_and_turns() {
         let mut window = ConversationWindow::new().with_system("be terse");
         window.push_user("hi");
@@ -577,6 +604,45 @@ mod tests {
         let summary = window.fold(&HeuristicSummariser::new(2, 200), 4).await.unwrap();
         assert!(summary.is_none());
         assert_eq!(window.turns().len(), 1);
+    }
+
+    #[derive(Default)]
+    struct CapturingSummariser {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Summariser for CapturingSummariser {
+        async fn summarise(&self, transcript: &str) -> MemoryResult<String> {
+            self.seen.lock().unwrap().push(transcript.to_string());
+            Ok("a summary".to_string())
+        }
+
+        fn id(&self) -> &str {
+            "capturing"
+        }
+    }
+
+    #[tokio::test]
+    async fn folding_records_the_tool_calls_an_assistant_made() {
+        let mut window = ConversationWindow::new().with_max_turns(100);
+        window.push(
+            Turn::assistant("let me check").with_tool_calls(vec![ToolCall::new(
+                "c1",
+                "weather",
+                serde_json::json!({"city": "Paris"}),
+            )]),
+        );
+        window.push(Turn::tool("c1", "21C"));
+        window.push_user("thanks");
+        let capture = CapturingSummariser::default();
+        window.fold(&capture, 1).await.unwrap();
+        let seen = capture.seen.lock().unwrap();
+        let transcript = seen.last().expect("a fold happened");
+        assert!(
+            transcript.contains("weather"),
+            "the transcript must record the action, not just the result: {transcript}"
+        );
     }
 
     #[tokio::test]
