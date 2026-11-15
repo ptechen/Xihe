@@ -1,7 +1,7 @@
 //! Schedules: ordered stages of systems, with concurrency inside a stage.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use crate::access::Access;
@@ -182,6 +182,8 @@ pub struct Schedule {
     stages: Vec<Stage>,
     last_run: HashMap<Cow<'static, str>, tokio::time::Instant>,
     flush_commands: bool,
+    isolate: bool,
+    failed: HashSet<String>,
 }
 
 impl Schedule {
@@ -191,7 +193,24 @@ impl Schedule {
             stages: Vec::new(),
             last_run: HashMap::new(),
             flush_commands: true,
+            isolate: false,
+            failed: HashSet::new(),
         }
+    }
+
+    /// Opt in to containing a failing system: it is recorded and skipped for the
+    /// rest of the run instead of aborting every other system and agent. The
+    /// default remains fail-fast, so a bad system still surfaces as an error.
+    pub fn isolate_system_errors(&mut self) -> &mut Self {
+        self.isolate = true;
+        self
+    }
+
+    /// Labels of systems that failed and were isolated, in sorted order.
+    pub fn failed_labels(&self) -> Vec<String> {
+        let mut labels: Vec<String> = self.failed.iter().cloned().collect();
+        labels.sort();
+        labels
     }
 
     /// Disables the automatic command flush at stage boundaries (the driver then
@@ -362,16 +381,27 @@ impl Schedule {
     pub async fn execute(&mut self, ctx: &SystemContext) -> Result<(), SystemError> {
         let frame = ctx.frame_number();
         tracing::debug!(frame, stages = self.stages.len(), "executing schedule");
+        let mut newly_failed: Vec<String> = Vec::new();
         for stage in &mut self.stages {
             match stage {
                 Stage::Sequential(specs) => {
                     let flags = cadence(&mut self.last_run, specs, frame);
                     for (spec, is_due) in specs.iter_mut().zip(flags) {
-                        if !is_due {
+                        if !is_due || self.failed.contains(spec.label.as_ref()) {
                             continue;
                         }
-                        run_guarded(&spec.label, spec.system.run(ctx.clone())).await?;
+                        if let Err(error) =
+                            run_guarded(&spec.label, spec.system.run(ctx.clone())).await
+                        {
+                            if self.isolate {
+                                tracing::warn!(system = %spec.label, %error, "system failed; isolated");
+                                newly_failed.push(spec.label.to_string());
+                            } else {
+                                return Err(error);
+                            }
+                        }
                         if ctx.is_stopping() {
+                            self.failed.extend(newly_failed);
                             return Ok(());
                         }
                     }
@@ -382,16 +412,28 @@ impl Schedule {
                     // futures coexist in one `join_all`.
                     let flags = cadence(&mut self.last_run, systems, frame);
                     let mut pending: Vec<SystemFuture<'_>> = Vec::new();
+                    let mut labels: Vec<Cow<'static, str>> = Vec::new();
                     for (spec, is_due) in systems.iter_mut().zip(flags) {
-                        if is_due {
+                        if is_due && !self.failed.contains(spec.label.as_ref()) {
+                            labels.push(spec.label.clone());
                             pending.push(Box::pin(run_guarded(
                                 &spec.label,
                                 spec.system.run(ctx.clone()),
                             )));
                         }
                     }
-                    for result in futures::future::join_all(pending).await {
-                        result?;
+                    for (label, result) in labels
+                        .into_iter()
+                        .zip(futures::future::join_all(pending).await)
+                    {
+                        if let Err(error) = result {
+                            if self.isolate {
+                                tracing::warn!(system = %label, %error, "system failed; isolated");
+                                newly_failed.push(label.to_string());
+                            } else {
+                                return Err(error);
+                            }
+                        }
                     }
                 }
             }
@@ -399,9 +441,11 @@ impl Schedule {
                 ctx.apply_commands().await;
             }
             if ctx.is_stopping() {
+                self.failed.extend(newly_failed);
                 return Ok(());
             }
         }
+        self.failed.extend(newly_failed);
         Ok(())
     }
 }
@@ -617,6 +661,59 @@ mod tests {
         let error = schedule.execute(&ctx).await.unwrap_err();
         assert_eq!(error.reason, "no api key");
         assert_eq!(seen.load(Ordering::Relaxed), 0, "later systems are skipped");
+    }
+
+    #[tokio::test]
+    async fn isolation_contains_a_failing_parallel_member() {
+        let healthy = Arc::new(AtomicU64::new(0));
+        let mut schedule = Schedule::new();
+        schedule
+            .parallel(
+                "workers",
+                [
+                    SystemSpec::new(
+                        "boom",
+                        system("boom", |_ctx: SystemContext| async { panic!("exploded") }),
+                    )
+                    .with_access(Access::read::<A>()),
+                    counting("healthy", healthy.clone(), Access::read::<A>()),
+                ],
+            )
+            .unwrap();
+        schedule.isolate_system_errors();
+        let ctx = SystemContext::new(WorldHandle::empty());
+
+        schedule.execute(&ctx).await.expect("a bad member must not abort the group");
+        assert_eq!(healthy.load(Ordering::Relaxed), 1, "the healthy member still ran");
+        assert_eq!(schedule.failed_labels(), vec!["boom".to_string()]);
+
+        // The failed member is skipped on later frames, the healthy one keeps running.
+        ctx.advance_frame();
+        schedule.execute(&ctx).await.unwrap();
+        assert_eq!(healthy.load(Ordering::Relaxed), 2);
+        assert_eq!(schedule.failed_labels(), vec!["boom".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_failing_parallel_member_still_aborts_by_default() {
+        let healthy = Arc::new(AtomicU64::new(0));
+        let mut schedule = Schedule::new();
+        schedule
+            .parallel(
+                "workers",
+                [
+                    SystemSpec::new(
+                        "boom",
+                        system("boom", |_ctx: SystemContext| async { panic!("exploded") }),
+                    )
+                    .with_access(Access::read::<A>()),
+                    counting("healthy", healthy.clone(), Access::read::<A>()),
+                ],
+            )
+            .unwrap();
+        let ctx = SystemContext::new(WorldHandle::empty());
+        assert!(schedule.execute(&ctx).await.is_err(), "fail-fast remains the default");
+        assert!(schedule.failed_labels().is_empty());
     }
 
     #[tokio::test]

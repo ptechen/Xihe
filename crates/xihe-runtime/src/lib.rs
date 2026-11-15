@@ -369,8 +369,9 @@ impl System for FrameLimit {
 mod tests {
     use super::*;
     use serde_json::json;
-    use xihe_agent::{EchoTool, ReactAgent, ToolRegistry};
+    use xihe_agent::{AgentStatus, EchoTool, FnTool, ReactAgent, ToolOutcome, ToolRegistry};
     use xihe_llm::{MockProvider, Reply};
+    use xihe_schedule::{system, SystemSpec};
 
     async fn echo_app() -> App {
         let mut app = App::new();
@@ -451,5 +452,94 @@ mod tests {
                 reason: "tests are done".into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_world_parked_on_a_human_settles_instead_of_burning_frames() {
+        let mut app = App::new();
+        app.add(LlmPlugin::new(LlmService::from_provider(MockProvider::with_script([
+            Reply::tool("deploy", json!({})),
+        ]))))
+        .await
+        .expect("llm");
+        app.add(ToolsPlugin).await.expect("tools");
+        app.add(ReactPlugin::new(4)).await.expect("react");
+        app.world_mut()
+            .resource_mut::<ToolRegistry>()
+            .unwrap()
+            .register(
+                FnTool::new("deploy", "ship it", |_ctx, _call| ToolOutcome::text("shipped"))
+                    .requiring_approval(),
+            );
+        app.world_mut()
+            .spawn_with((ReactAgent::new("ops", "ship carefully").ask("ship"),));
+
+        let reason = Driver::new(4)
+            .without_observation()
+            .drive(&mut app)
+            .await
+            .expect("ran");
+        assert_eq!(
+            reason,
+            StopReason::Settled,
+            "waiting on a human is not owed work; the driver must not burn frames"
+        );
+        assert!(!app.busy(), "a parked world owes no compute");
+        let agent = app
+            .world()
+            .query::<&ReactAgent>()
+            .next()
+            .expect("an agent");
+        assert_eq!(agent.status(), AgentStatus::AwaitingApproval);
+    }
+
+    async fn app_with_a_panicking_system() -> App {
+        let mut app = App::new();
+        app.add(LlmPlugin::new(LlmService::from_provider(MockProvider::with_script([
+            Reply::text("done"),
+        ]))))
+        .await
+        .expect("llm");
+        app.add(ToolsPlugin).await.expect("tools");
+        app.add(ReactPlugin::new(4)).await.expect("react");
+        app.add_system(SystemSpec::new(
+            "boom",
+            system("boom", |_ctx| async { panic!("the plugin exploded") }),
+        ));
+        app.world_mut()
+            .spawn_with((ReactAgent::new("scribe", "be brief").ask("hi"),));
+        app
+    }
+
+    #[tokio::test]
+    async fn isolating_system_errors_lets_healthy_agents_finish() {
+        let mut app = app_with_a_panicking_system().await;
+        app.schedule_mut().isolate_system_errors();
+
+        let reason = app
+            .run(4)
+            .await
+            .expect("a bad system must not abort the whole app");
+        assert_eq!(reason, StopReason::Settled);
+        let agent = app
+            .world()
+            .query::<&ReactAgent>()
+            .next()
+            .expect("an agent");
+        assert_eq!(agent.answer(), Some("done"));
+        assert!(
+            app.schedule_mut()
+                .failed_labels()
+                .iter()
+                .any(|label| label == "boom"),
+            "the failing system is recorded and skipped, not silently retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_isolation_a_failing_system_still_aborts_the_run() {
+        let mut app = app_with_a_panicking_system().await;
+        let result = app.run(4).await;
+        assert!(result.is_err(), "fail-fast remains the default");
     }
 }

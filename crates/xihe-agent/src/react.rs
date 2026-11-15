@@ -1410,12 +1410,11 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
 async fn update_work(ctx: &SystemContext, _label: &str) {
     let busy = ctx
         .with_world(|world| {
-            world.query::<&ReactAgent>().any(|agent| {
-                matches!(
-                    agent.status,
-                    AgentStatus::Working | AgentStatus::AwaitingApproval
-                )
-            })
+            // A parked agent waits on a human, not on compute; only a park a
+            // human has already decided still owes a resume.
+            world
+                .query::<&ReactAgent>()
+                .any(|agent| agent.status == AgentStatus::Working || agent.has_decision())
         })
         .await;
     ctx.with_world_mut(|world| Work::ensure(world).set("agents", busy))
