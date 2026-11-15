@@ -1,7 +1,19 @@
 //! The request a provider receives: model, conversation, tools, sampling.
 
 use crate::message::{ChatMessage, GenerationParams, Role, ToolChoice, ToolDescriptor};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// A stable identity for a model call, used to key record-and-replay so two
+/// agents issuing byte-identical requests do not collide. Never sent to the
+/// provider: [`to_wire`](crate::to_wire) builds the request body field by field.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Correlation {
+    /// The agent that issued the call.
+    pub agent: String,
+    /// The agent's turn number when the call was made.
+    pub turn: usize,
+}
 
 /// Everything needed to ask a model for the next turn.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -16,6 +28,8 @@ pub struct GenerationRequest {
     pub tool_choice: ToolChoice,
     /// Sampling parameters.
     pub params: GenerationParams,
+    /// Optional record-and-replay identity; ignored by providers and the wire.
+    pub correlation: Option<Correlation>,
 }
 
 impl GenerationRequest {
@@ -67,6 +81,15 @@ impl GenerationRequest {
     /// Set the tool-choice policy.
     pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
         self.tool_choice = choice;
+        self
+    }
+
+    /// Tag the call with a stable agent-and-turn identity for record-and-replay.
+    pub fn with_correlation(mut self, agent: impl Into<String>, turn: usize) -> Self {
+        self.correlation = Some(Correlation {
+            agent: agent.into(),
+            turn,
+        });
         self
     }
 

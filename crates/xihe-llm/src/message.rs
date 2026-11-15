@@ -408,7 +408,7 @@ impl ToolChoice {
 }
 
 /// Why a generation stopped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FinishReason {
     /// A complete answer.
     Stop,
@@ -490,7 +490,7 @@ impl std::ops::Add for TokenUsage {
 }
 
 /// The outcome of one generation.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GenerationResponse {
     /// Assistant text, empty for a pure tool call.
     pub content: String,

@@ -93,7 +93,7 @@ pub use message::{
 };
 pub use mock::{Exhausted, MockProvider, Reply};
 pub use provider::{Capabilities, DynProvider, Provider, StreamBox, collect_stream, one_shot};
-pub use request::{GenerationRequest, RequestPatch};
+pub use request::{Correlation, GenerationRequest, RequestPatch};
 pub use wire::{error_from_status, parse_completion, parse_stream_event, to_wire};
 
 #[cfg(feature = "openai")]

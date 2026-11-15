@@ -70,8 +70,9 @@ pub use xihe_runtime as runtime;
 pub use xihe_schedule as schedule;
 
 pub use xihe_agent::{
-    AgentError, AgentStatus, EchoTool, FnTool, Guardrails, LlmService, LookupTool, MemoryService,
-    React, ReactAgent, ResponseFormat, Tool, ToolContext, ToolOutcome, ToolRegistry,
+    AgentError, AgentStatus, EchoTool, FnTool, Guardrails, Journal, LlmService, LookupTool,
+    MemoryService, React, ReactAgent, ReplayProvider, ResponseFormat, Tool, ToolContext, ToolOutcome,
+    ToolRegistry,
 };
 pub use xihe_core::{Entity, World};
 pub use xihe_llm::{ChatClient, MockProvider, Reply, StreamChunk};

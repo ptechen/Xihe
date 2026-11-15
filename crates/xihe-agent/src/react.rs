@@ -50,11 +50,15 @@
 //! #     .enable_all().build().unwrap().block_on(async { run().await.unwrap(); });
 //! ```
 
+use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use serde_json::Value;
 use xihe_core::Entity;
 use xihe_llm::{ChatClient, ChatMessage, GenerationRequest, GenerationResponse, StreamChunk, ToolCall, ToolDescriptor};
@@ -68,6 +72,7 @@ use crate::hitl::{ApprovalRequest, Approver, Decision};
 use crate::llm::LlmService;
 use crate::memory::MemoryService;
 use crate::output::ResponseFormat;
+use crate::replay::Journal;
 use crate::tool::{ToolContext, ToolOutcome, ToolRegistry};
 
 /// Where the agent is in its task.
@@ -397,7 +402,8 @@ impl ReactAgent {
             response.content.clone()
         };
         if !content.is_empty() {
-            self.conversation.push(Turn::assistant(content));
+            self.conversation
+                .push(Turn::assistant(content).with_tool_calls(response.tool_calls.clone()));
         }
     }
 
@@ -463,8 +469,11 @@ impl ReactAgent {
 /// The system that runs the loop.
 ///
 /// One activation advances every busy agent through up to [`React::steps`]
-/// reason-act rounds. Agents in the same round call their providers
-/// concurrently, outside the world lock, and are written back one at a time.
+/// reason-act rounds. Agents progress independently: each call runs outside the
+/// world lock and is written back the moment it completes, so a fast agent never
+/// waits on a slow one. Calls in flight together are applied one at a time, and
+/// the journal keys each by a stable per-agent identity, so the final state is
+/// deterministic even though completion order is not.
 pub struct React {
     name: String,
     steps: usize,
@@ -578,46 +587,69 @@ impl System for React {
     }
 
     async fn run(&mut self, ctx: SystemContext) -> SysResult {
-        for _ in 0..self.steps {
+        // A pool of in-flight steps. Each outcome is applied the moment it
+        // completes and only that agent is re-planned, so agents advance at
+        // their own pace instead of waiting on the slowest call in a round.
+        let mut pool: FuturesUnordered<Pin<Box<dyn Future<Output = Outcome> + Send>>> =
+            FuturesUnordered::new();
+        let mut rounds: HashMap<Entity, usize> = HashMap::new();
+
+        if ctx.is_stopping() {
+            stop_agents(&ctx).await;
+            update_work(&ctx, &self.name).await;
+            return Ok(());
+        }
+        if self.fold_threshold > 0 {
+            fold_overlong(&ctx, self.fold_threshold, self.keep_last).await;
+        }
+        for step in plan_batch(&ctx, self.approver.clone(), self.stream_sink.clone()).await {
+            pool.push(Box::pin(run_step(step)));
+        }
+
+        loop {
             if ctx.is_stopping() {
                 stop_agents(&ctx).await;
                 break;
             }
-            if self.fold_threshold > 0 {
-                fold_overlong(&ctx, self.fold_threshold, self.keep_last).await;
-            }
-            let steps = plan_batch(&ctx, self.approver.clone(), self.stream_sink.clone()).await;
-            if steps.is_empty() {
-                break;
-            }
-            let work = futures::future::join_all(steps.into_iter().map(|step| async move {
-                match step {
-                    Step::Generate(generation) => (*generation).execute().await,
-                    Step::Resume(resume) => (*resume).execute().await,
-                    Step::Fail { entity, error } => Outcome::Failed { entity, error },
-                }
-            }));
             // Race the in-flight calls against shutdown: a stop signalled
             // mid-generation drops the provider future rather than waiting it out.
-            let outcomes = tokio::select! {
-                outcomes = work => outcomes,
+            let next = tokio::select! {
+                next = pool.next() => next,
                 _ = ctx.stop_token().wait() => {
                     stop_agents(&ctx).await;
                     break;
                 }
             };
-            let mut any = false;
-            for outcome in outcomes {
-                if apply(ctx.clone(), outcome).await {
-                    any = true;
-                }
+            let Some(outcome) = next else { break };
+            let entity = outcome_entity(&outcome);
+            if !apply(ctx.clone(), outcome).await {
+                continue;
             }
-            if !any {
-                break;
+            let used = rounds.entry(entity).or_insert(0);
+            *used += 1;
+            if *used >= self.steps {
+                continue;
+            }
+            if self.fold_threshold > 0 {
+                fold_overlong(&ctx, self.fold_threshold, self.keep_last).await;
+            }
+            if let Some(step) =
+                plan_one(&ctx, entity, self.approver.clone(), self.stream_sink.clone()).await
+            {
+                pool.push(Box::pin(run_step(step)));
             }
         }
         update_work(&ctx, &self.name).await;
         Ok(())
+    }
+}
+
+/// Run one planned step to its outcome, outside the world lock.
+async fn run_step(step: Step) -> Outcome {
+    match step {
+        Step::Generate(generation) => (*generation).execute().await,
+        Step::Resume(resume) => (*resume).execute().await,
+        Step::Fail { entity, error } => Outcome::Failed { entity, error },
     }
 }
 
@@ -635,6 +667,7 @@ struct Generation {
     max_tool_calls: usize,
     spend: Spend,
     stream_sink: Option<tokio::sync::mpsc::UnboundedSender<StreamChunk>>,
+    journal: Option<Journal>,
 }
 
 /// A step that continues a parked call a human has answered.
@@ -709,60 +742,118 @@ async fn plan_batch(
     let store = MemoryService::read(ctx).await;
 
     ctx.with_world(|world| {
+        let journal = world.resource::<Journal>().cloned();
         let mut steps = Vec::new();
         for (entity, agent) in world.query::<(Entity, &ReactAgent)>() {
-            let turn = agent.spend.turns;
-            if agent.has_decision() {
-                if let (Some(request), Some(decision)) =
-                    (agent.awaiting.clone(), agent.decision.clone())
-                {
-                    steps.push(Step::Resume(Box::new(Resume {
-                        entity,
-                        turn,
-                        request,
-                        decision,
-                        registry: registry.clone(),
-                        tool_ctx: tool_context(entity, agent, store.as_ref()),
-                        approver: approver.clone(),
-                    })));
-                }
-                continue;
-            }
-            if !agent.awaits_model() {
-                continue;
-            }
-            if let Err(error) = agent.guardrails.check(&agent.spend, agent.elapsed()) {
-                steps.push(Step::Fail { entity, error });
-                continue;
-            }
-            let Some(service) = service.clone() else {
-                steps.push(Step::Fail {
-                    entity,
-                    error: AgentError::config(
-                        "this world has no LlmService resource for the agent to ask",
-                    ),
-                });
-                continue;
-            };
-            let descriptors = agent.guardrails.filter_tools(registry.descriptors());
-            steps.push(Step::Generate(Box::new(Generation {
+            if let Some(step) = step_for(
                 entity,
-                turn,
-                client: service.shared(),
-                request: agent.build_request(descriptors),
-                registry: registry.clone(),
-                tool_ctx: tool_context(entity, agent, store.as_ref()),
-                approver: approver.clone(),
-                format: agent.format.clone(),
-                repairs_left: agent.repairs_left,
-                max_tool_calls: agent.guardrails.max_tool_calls,
-                spend: agent.spend,
-                stream_sink: stream_sink.clone(),
-            })));
+                agent,
+                &service,
+                &registry,
+                store.as_ref(),
+                &approver,
+                &stream_sink,
+                &journal,
+            ) {
+                steps.push(step);
+            }
         }
         steps
     })
     .await
+}
+
+/// Collect the next step for a single agent, so it can advance without waiting
+/// on the others. Returns `None` once the agent no longer owes a call.
+async fn plan_one(
+    ctx: &SystemContext,
+    entity: Entity,
+    approver: Option<Arc<dyn Approver>>,
+    stream_sink: Option<tokio::sync::mpsc::UnboundedSender<StreamChunk>>,
+) -> Option<Step> {
+    let service = LlmService::read(ctx).await;
+    let registry = ctx
+        .with_world(|world| world.resource::<ToolRegistry>().cloned())
+        .await
+        .unwrap_or_default();
+    let store = MemoryService::read(ctx).await;
+
+    ctx.with_world(|world| {
+        let journal = world.resource::<Journal>().cloned();
+        let agent = world.get::<ReactAgent>(entity)?;
+        step_for(
+            entity,
+            agent,
+            &service,
+            &registry,
+            store.as_ref(),
+            &approver,
+            &stream_sink,
+            &journal,
+        )
+    })
+    .await
+}
+
+/// Build the step one agent owes, or `None` when it is settled or parked without
+/// a decision. Shared by the batch seed and the per-agent continuation so both
+/// plan identically.
+#[allow(clippy::too_many_arguments)]
+fn step_for(
+    entity: Entity,
+    agent: &ReactAgent,
+    service: &Option<LlmService>,
+    registry: &ToolRegistry,
+    store: Option<&MemoryService>,
+    approver: &Option<Arc<dyn Approver>>,
+    stream_sink: &Option<tokio::sync::mpsc::UnboundedSender<StreamChunk>>,
+    journal: &Option<Journal>,
+) -> Option<Step> {
+    let turn = agent.spend.turns;
+    if agent.has_decision() {
+        if let (Some(request), Some(decision)) = (agent.awaiting.clone(), agent.decision.clone()) {
+            return Some(Step::Resume(Box::new(Resume {
+                entity,
+                turn,
+                request,
+                decision,
+                registry: registry.clone(),
+                tool_ctx: tool_context(entity, agent, store),
+                approver: approver.clone(),
+            })));
+        }
+        return None;
+    }
+    if !agent.awaits_model() {
+        return None;
+    }
+    if let Err(error) = agent.guardrails.check(&agent.spend, agent.elapsed()) {
+        return Some(Step::Fail { entity, error });
+    }
+    let Some(service) = service.clone() else {
+        return Some(Step::Fail {
+            entity,
+            error: AgentError::config("this world has no LlmService resource for the agent to ask"),
+        });
+    };
+    let descriptors = agent.guardrails.filter_tools(registry.descriptors());
+    Some(Step::Generate(Box::new(Generation {
+        entity,
+        turn,
+        client: service.shared(),
+        request: agent
+            .build_request(descriptors)
+            .with_correlation(agent.name.clone(), turn),
+        registry: registry.clone(),
+        tool_ctx: tool_context(entity, agent, store),
+        approver: approver.clone(),
+        format: agent.format.clone(),
+        repairs_left: agent.repairs_left,
+        max_tool_calls: agent.guardrails.max_tool_calls,
+        spend: agent.spend,
+        stream_sink: stream_sink.clone(),
+        journal: journal.clone(),
+    })))
 }
 
 impl Generation {
@@ -806,8 +897,23 @@ impl Generation {
                 }
             }
         };
+        if let Some(journal) = &self.journal {
+            journal.record(&self.request, response.as_ref());
+        }
         if response.tool_calls.is_empty() {
             return self.settle(response);
+        }
+        if let Some(journal) = &self.journal
+            && let Some((results, refused)) = journal.lookup_tools(&self.request)
+        {
+            return Outcome::Acted {
+                entity: self.entity,
+                turn: self.turn,
+                response,
+                results,
+                refused,
+                parked: None,
+            };
         }
         let room = if self.max_tool_calls == 0 {
             usize::MAX
@@ -824,6 +930,11 @@ impl Generation {
             self.approver.as_ref(),
         )
         .await;
+        if parked.is_none()
+            && let Some(journal) = &self.journal
+        {
+            journal.record_tools(&self.request, results.clone(), refused);
+        }
         Outcome::Acted {
             entity: self.entity,
             turn: self.turn,
@@ -1383,6 +1494,495 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tool_round_replays_the_assistant_tool_calls() {
+        use std::sync::Mutex;
+        use xihe_llm::{LlmError, Provider, Role};
+
+        struct CapturingProvider {
+            requests: Arc<Mutex<Vec<GenerationRequest>>>,
+            calls: Mutex<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for CapturingProvider {
+            fn id(&self) -> &str {
+                "capture"
+            }
+            fn default_model(&self) -> &str {
+                "capture"
+            }
+            async fn generate(
+                &self,
+                request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                self.requests.lock().unwrap().push(request.clone());
+                let mut calls = self.calls.lock().unwrap();
+                let response = if *calls == 0 {
+                    GenerationResponse::default().with_tool_calls(vec![ToolCall::new(
+                        "call_1",
+                        "echo",
+                        json!({"text": "hi"}),
+                    )])
+                } else {
+                    GenerationResponse::text("echoed hi")
+                };
+                *calls += 1;
+                Ok(response)
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = CapturingProvider {
+            requests: requests.clone(),
+            calls: Mutex::new(0),
+        };
+        let mut registry = ToolRegistry::new();
+        registry.register(EchoTool);
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(LlmService::from_provider(provider));
+        world.spawn_with((ReactAgent::new("scribe", "be brief").ask("say hi"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the loop runs");
+
+        let agent = only_agent(&ctx).await;
+        assert_eq!(agent.status(), AgentStatus::Finished);
+
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2, "a tool round then an answer round");
+        let second = &captured[1];
+        let tool_msg = second
+            .messages
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("a tool result is replayed");
+        let call_id = tool_msg
+            .tool_call_id
+            .clone()
+            .expect("the tool result names its call");
+        let assistant = second
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
+            .expect("an assistant turn precedes the tool result");
+        assert!(
+            assistant.tool_calls.iter().any(|call| call.id == call_id),
+            "the replayed assistant turn must carry the tool_calls its tool result answers: {assistant:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recorded_run_replays_identically() {
+        use std::sync::Mutex;
+        use xihe_llm::{LlmError, Provider};
+
+        use crate::replay::{Journal, ReplayProvider};
+
+        // A provider whose answer changes on every call. Re-running it would
+        // not reproduce the first run, so an identical replay proves the
+        // journal fed the recorded responses back rather than the model
+        // answering again.
+        struct VaryingProvider {
+            calls: Mutex<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for VaryingProvider {
+            fn id(&self) -> &str {
+                "varying"
+            }
+            fn default_model(&self) -> &str {
+                "varying"
+            }
+            async fn generate(
+                &self,
+                _request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                let mut calls = self.calls.lock().unwrap();
+                let n = *calls;
+                *calls += 1;
+                Ok(if n == 0 {
+                    GenerationResponse::default().with_tool_calls(vec![ToolCall::new(
+                        "call_1",
+                        "echo",
+                        json!({"text": format!("v{n}")}),
+                    )])
+                } else {
+                    GenerationResponse::text(format!("answer-{n}"))
+                })
+            }
+        }
+
+        let journal = Journal::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(EchoTool);
+
+        let mut world = World::new();
+        world.insert_resource(registry.clone());
+        world.insert_resource(LlmService::from_provider(VaryingProvider {
+            calls: Mutex::new(0),
+        }));
+        world.insert_resource(journal.clone());
+        world.spawn_with((ReactAgent::new("scribe", "be brief").ask("say hi"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the record run");
+        let recorded = only_agent(&ctx).await;
+        assert_eq!(recorded.status(), AgentStatus::Finished);
+        assert!(journal.len() >= 2, "both model calls were journaled");
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(LlmService::from_provider(ReplayProvider::new(journal)));
+        world.spawn_with((ReactAgent::new("scribe", "be brief").ask("say hi"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the replay run");
+        let replayed = only_agent(&ctx).await;
+
+        assert_eq!(replayed.status(), AgentStatus::Finished);
+        assert_eq!(replayed.answer(), recorded.answer());
+        assert_eq!(replayed.turns(), recorded.turns());
+        assert_eq!(
+            replayed.conversation().render(),
+            recorded.conversation().render(),
+            "replay must reproduce the transcript turn for turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_agents_with_identical_requests_replay_their_own_answers() {
+        use std::sync::Mutex;
+        use xihe_llm::{LlmError, Provider};
+
+        use crate::replay::{Journal, ReplayProvider};
+
+        // A different answer on every call. Two agents with the same
+        // instructions and the same question issue byte-identical requests, so
+        // only a stable per-agent key can keep their recorded answers apart.
+        struct CountingProvider {
+            calls: Mutex<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for CountingProvider {
+            fn id(&self) -> &str {
+                "counting"
+            }
+            fn default_model(&self) -> &str {
+                "counting"
+            }
+            async fn generate(
+                &self,
+                _request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                let mut calls = self.calls.lock().unwrap();
+                let n = *calls;
+                *calls += 1;
+                Ok(GenerationResponse::text(format!("answer-{n}")))
+            }
+        }
+
+        async fn answers(ctx: &SystemContext) -> (String, String) {
+            let world = ctx.world.read().await;
+            let mut alpha = None;
+            let mut beta = None;
+            for (_entity, agent) in world.query::<(Entity, &ReactAgent)>() {
+                match agent.name() {
+                    "alpha" => alpha = Some(agent.answer().unwrap_or("").to_string()),
+                    "beta" => beta = Some(agent.answer().unwrap_or("").to_string()),
+                    _ => {}
+                }
+            }
+            (alpha.expect("alpha answered"), beta.expect("beta answered"))
+        }
+
+        let journal = Journal::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(EchoTool);
+
+        let mut world = World::new();
+        world.insert_resource(registry.clone());
+        world.insert_resource(LlmService::from_provider(CountingProvider {
+            calls: Mutex::new(0),
+        }));
+        world.insert_resource(journal.clone());
+        world.spawn_with((ReactAgent::new("alpha", "be brief").ask("say hi"),));
+        world.spawn_with((ReactAgent::new("beta", "be brief").ask("say hi"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the record run");
+        let (recorded_alpha, recorded_beta) = answers(&ctx).await;
+        assert_ne!(
+            recorded_alpha, recorded_beta,
+            "the provider must give the two agents different answers"
+        );
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(LlmService::from_provider(ReplayProvider::new(journal)));
+        world.spawn_with((ReactAgent::new("alpha", "be brief").ask("say hi"),));
+        world.spawn_with((ReactAgent::new("beta", "be brief").ask("say hi"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the replay run");
+        let (replayed_alpha, replayed_beta) = answers(&ctx).await;
+
+        assert_eq!(
+            replayed_alpha, recorded_alpha,
+            "alpha must replay its own answer, not beta's"
+        );
+        assert_eq!(
+            replayed_beta, recorded_beta,
+            "beta must replay its own answer, not alpha's"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_does_not_re_execute_tools() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::replay::{Journal, ReplayProvider};
+
+        let journal = Journal::new();
+        let executions = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = ToolRegistry::new();
+        let counter = executions.clone();
+        registry.register(FnTool::new("deploy", "ship it", move |_ctx, _call| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            ToolOutcome::ok(json!({"shipped": true}), "shipped to staging")
+        }));
+
+        let mut world = World::new();
+        world.insert_resource(registry.clone());
+        world.insert_resource(LlmService::from_provider(MockProvider::tool_then_answer(
+            "deploy",
+            json!({}),
+            "staging is live",
+        )));
+        world.insert_resource(journal.clone());
+        world.spawn_with((ReactAgent::new("ops", "ship carefully").ask("ship"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the record run");
+        let recorded = only_agent(&ctx).await;
+        assert_eq!(recorded.answer(), Some("staging is live"));
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "the tool ran once while recording"
+        );
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(journal.clone());
+        world.insert_resource(LlmService::from_provider(ReplayProvider::new(journal)));
+        world.spawn_with((ReactAgent::new("ops", "ship carefully").ask("ship"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the replay run");
+        let replayed = only_agent(&ctx).await;
+
+        assert_eq!(replayed.answer(), recorded.answer());
+        assert_eq!(
+            replayed.conversation().render(),
+            recorded.conversation().render()
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "replay must feed the recorded tool result, not re-run the side effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_journal_survives_a_byte_round_trip_for_replay() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::replay::{Journal, ReplayProvider};
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        let counter = executions.clone();
+        registry.register(FnTool::new("deploy", "ship it", move |_ctx, _call| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            ToolOutcome::ok(json!({"shipped": true}), "shipped to staging")
+        }));
+
+        let journal = Journal::new();
+        let mut world = World::new();
+        world.insert_resource(registry.clone());
+        world.insert_resource(LlmService::from_provider(MockProvider::tool_then_answer(
+            "deploy",
+            json!({}),
+            "staging is live",
+        )));
+        world.insert_resource(journal.clone());
+        world.spawn_with((ReactAgent::new("ops", "ship carefully").ask("ship"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the record run");
+        let recorded = only_agent(&ctx).await;
+        assert_eq!(executions.load(Ordering::SeqCst), 1, "the tool ran once");
+
+        // Persist to bytes and rebuild a fresh journal from them alone: no
+        // shared state with the recording journal, as a second process would.
+        let bytes = journal.to_bytes().expect("serialize the journal");
+        drop(journal);
+        let replay_journal = Journal::from_bytes(&bytes).expect("deserialize the journal");
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(replay_journal.clone());
+        world.insert_resource(LlmService::from_provider(ReplayProvider::new(replay_journal)));
+        world.spawn_with((ReactAgent::new("ops", "ship carefully").ask("ship"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the replay run");
+        let replayed = only_agent(&ctx).await;
+
+        assert_eq!(replayed.answer(), recorded.answer());
+        assert_eq!(
+            replayed.conversation().render(),
+            recorded.conversation().render()
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "replay from bytes must not re-run the tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_journal_saved_to_disk_replays_without_re_running_tools() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::replay::{Journal, ReplayProvider};
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        let counter = executions.clone();
+        registry.register(FnTool::new("deploy", "ship it", move |_ctx, _call| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            ToolOutcome::ok(json!({"shipped": true}), "shipped to staging")
+        }));
+
+        let journal = Journal::new();
+        let mut world = World::new();
+        world.insert_resource(registry.clone());
+        world.insert_resource(LlmService::from_provider(MockProvider::tool_then_answer(
+            "deploy",
+            json!({}),
+            "staging is live",
+        )));
+        world.insert_resource(journal.clone());
+        world.spawn_with((ReactAgent::new("ops", "ship carefully").ask("ship"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the record run");
+        let recorded = only_agent(&ctx).await;
+        assert_eq!(executions.load(Ordering::SeqCst), 1, "the tool ran once");
+
+        // Persist to a real file, then drop the recording journal entirely.
+        let path = std::env::temp_dir().join(format!("xihe-journal-{}.json", std::process::id()));
+        journal.save(&path).expect("save to disk");
+        drop(journal);
+
+        // A fresh journal loaded from disk shares nothing with the recorder.
+        let replay_journal = Journal::load(&path).expect("load from disk");
+        std::fs::remove_file(&path).ok();
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(replay_journal.clone());
+        world.insert_resource(LlmService::from_provider(ReplayProvider::new(replay_journal)));
+        world.spawn_with((ReactAgent::new("ops", "ship carefully").ask("ship"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the replay run");
+        let replayed = only_agent(&ctx).await;
+
+        assert_eq!(replayed.answer(), recorded.answer());
+        assert_eq!(
+            replayed.conversation().render(),
+            recorded.conversation().render()
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "replay from disk must not re-run the tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fast_agent_finishes_without_waiting_for_a_slow_one() {
+        use std::time::Duration;
+        use tokio::sync::Notify;
+        use xihe_llm::{LlmError, Provider};
+
+        // The slow agent's call blocks until the fast agent is observed
+        // Finished. Under a round barrier the fast agent cannot be applied
+        // (and so cannot finish) until the slow call returns, which never
+        // happens: deadlock. Independent progression lets the fast agent
+        // finish on its own and open the slow agent's gate.
+        struct GateProvider {
+            gate: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for GateProvider {
+            fn id(&self) -> &str {
+                "gate"
+            }
+            fn default_model(&self) -> &str {
+                "gate"
+            }
+            async fn generate(
+                &self,
+                request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                let name = request
+                    .correlation
+                    .as_ref()
+                    .map(|c| c.agent.as_str())
+                    .unwrap_or("");
+                if name == "slow" {
+                    self.gate.notified().await;
+                }
+                Ok(GenerationResponse::text(format!("{name} done")))
+            }
+        }
+
+        let gate = Arc::new(Notify::new());
+        let mut world = World::new();
+        world.insert_resource(ToolRegistry::new());
+        world.insert_resource(LlmService::from_provider(GateProvider { gate: gate.clone() }));
+        let fast = world.spawn_with((ReactAgent::new("fast", "be brief").ask("hi"),));
+        world.spawn_with((ReactAgent::new("slow", "be brief").ask("hi"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+
+        // Open the slow agent's gate the moment the fast agent finishes.
+        let handle = ctx.world.clone();
+        let watcher_gate = gate.clone();
+        let watcher = tokio::spawn(async move {
+            loop {
+                {
+                    let world = handle.read().await;
+                    if let Some(agent) = world.get::<ReactAgent>(fast)
+                        && agent.status() == AgentStatus::Finished
+                    {
+                        watcher_gate.notify_one();
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+
+        let ran = tokio::time::timeout(Duration::from_secs(3), React::new().run(ctx.clone())).await;
+        watcher.abort();
+        let ran = ran.expect("the fast agent must finish without waiting for the slow one");
+        ran.expect("the loop runs");
+
+        let world = ctx.world.read().await;
+        for (_entity, agent) in world.query::<(Entity, &ReactAgent)>() {
+            assert_eq!(agent.status(), AgentStatus::Finished, "{}", agent.name());
+        }
+    }
+
+    #[tokio::test]
     async fn a_turn_ceiling_stops_the_loop() {
         let mut registry = ToolRegistry::new();
         registry.register(EchoTool);
@@ -1771,5 +2371,82 @@ mod tests {
             agent.conversation().render().contains("panicked"),
             "the model saw the failure as a tool result"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manual scaling measurement; run with --ignored --nocapture"]
+    async fn measure_world_lock_scaling() {
+        use xihe_llm::{LlmError, Provider};
+
+        struct LatencyProvider {
+            latency: Duration,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for LatencyProvider {
+            fn id(&self) -> &str {
+                "latency"
+            }
+            fn default_model(&self) -> &str {
+                "latency"
+            }
+            async fn generate(
+                &self,
+                _request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                tokio::time::sleep(self.latency).await;
+                Ok(GenerationResponse::text("done"))
+            }
+        }
+
+        let latency = Duration::from_millis(50);
+        println!("model latency per agent: {latency:?} (lock is released while it sleeps)");
+        for n in [1usize, 8, 32, 64] {
+            let mut world = World::new();
+            world.insert_resource(ToolRegistry::new());
+            world.insert_resource(LlmService::from_provider(LatencyProvider { latency }));
+            for index in 0..n {
+                world.spawn_with((ReactAgent::new(format!("agent-{index}"), "be brief").ask("hi"),));
+            }
+            let ctx = SystemContext::new(WorldHandle::new(world));
+            let started = Instant::now();
+            React::new().run(ctx.clone()).await.expect("the loop runs");
+            let wall = started.elapsed();
+            let finished = {
+                let guard = ctx.world.read().await;
+                guard
+                    .query::<&ReactAgent>()
+                    .filter(|agent| agent.status() == AgentStatus::Finished)
+                    .count()
+            };
+            assert_eq!(finished, n, "every agent should finish for a valid measurement");
+            let serial = latency.as_secs_f64() * n as f64;
+            println!(
+                "agents={n:3}  wall={wall:>10?}  per-agent={:>10?}  speedup-vs-serial={:5.1}x",
+                wall / n as u32,
+                serial / wall.as_secs_f64()
+            );
+        }
+
+        // Zero latency strips away the model call so the lock + scheduling
+        // overhead is the only cost left: the theoretical throughput ceiling.
+        let latency = Duration::ZERO;
+        println!("\nzero model latency: exposes lock + scheduling overhead alone");
+        for n in [1usize, 8, 32, 64, 256] {
+            let mut world = World::new();
+            world.insert_resource(ToolRegistry::new());
+            world.insert_resource(LlmService::from_provider(LatencyProvider { latency }));
+            for index in 0..n {
+                world.spawn_with((ReactAgent::new(format!("agent-{index}"), "be brief").ask("hi"),));
+            }
+            let ctx = SystemContext::new(WorldHandle::new(world));
+            let started = Instant::now();
+            React::new().run(ctx.clone()).await.expect("the loop runs");
+            let wall = started.elapsed();
+            println!(
+                "agents={n:3}  wall={wall:>10?}  per-agent={:>10?}",
+                wall / n as u32
+            );
+        }
     }
 }

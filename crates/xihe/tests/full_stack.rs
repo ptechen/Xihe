@@ -158,3 +158,128 @@ async fn a_custom_system_participates_in_work_driving() {
     assert!(app.world().has_resource::<Pending>());
     assert!(!app.busy());
 }
+
+#[tokio::test]
+async fn a_parallel_fan_out_replays_end_to_end_without_re_running_tools() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use xihe::llm::{GenerationRequest, GenerationResponse, LlmError, Provider, Role, ToolCall};
+    use xihe::{FanOut, FanOutResult, FanOutTask, FnTool, Journal, ReplayProvider, ToolOutcome};
+
+    // Each agent ships once (a tool round) then answers, and the answer text
+    // depends on global call order. Re-running would change the answers and
+    // fire the side effect again; replay must reproduce both exactly.
+    struct FanProvider {
+        calls: Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FanProvider {
+        fn id(&self) -> &str {
+            "fan"
+        }
+        fn default_model(&self) -> &str {
+            "fan"
+        }
+        async fn generate(
+            &self,
+            request: &GenerationRequest,
+        ) -> Result<GenerationResponse, LlmError> {
+            let answered = request.messages.iter().any(|message| message.role == Role::Tool);
+            let mut calls = self.calls.lock().unwrap();
+            let n = *calls;
+            *calls += 1;
+            Ok(if answered {
+                GenerationResponse::text(format!("answer-{n}"))
+            } else {
+                GenerationResponse::default().with_tool_calls(vec![ToolCall::new(
+                    format!("call_{n}"),
+                    "deploy",
+                    serde_json::json!({}),
+                )])
+            })
+        }
+    }
+
+    async fn build_app<P: Provider>(
+        provider: P,
+        journal: Journal,
+        ships: Arc<AtomicUsize>,
+    ) -> (App, Roster) {
+        let mut app = App::new();
+        app.add(ToolsPlugin).await.unwrap();
+        app.add(LlmPlugin::new(LlmService::from_provider(provider)))
+            .await
+            .unwrap();
+        app.world_mut().insert_resource(journal);
+        let counter = ships.clone();
+        app.world_mut()
+            .resource_mut::<ToolRegistry>()
+            .unwrap()
+            .register(FnTool::new("deploy", "ship the release", move |_ctx, _call| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                ToolOutcome::ok(serde_json::json!({"shipped": true}), "shipped to staging")
+            }));
+        let mut roster = Roster::new();
+        roster.spawn(
+            app.world_mut(),
+            "ships releases",
+            ReactAgent::new("alpha", "ship carefully"),
+        );
+        roster.spawn(
+            app.world_mut(),
+            "ships releases",
+            ReactAgent::new("beta", "ship carefully"),
+        );
+        app.add(ReactPlugin::new(6)).await.unwrap();
+        app.add_system(SystemSpec::new(
+            "fan",
+            FanOutTask::new(
+                FanOut::new(["alpha", "beta"]),
+                roster.clone(),
+                "ship the release",
+            ),
+        ));
+        (app, roster)
+    }
+
+    fn answers(app: &App, roster: &Roster) -> (String, String) {
+        let world = app.world();
+        let answer = |name: &str| {
+            world
+                .get::<ReactAgent>(roster.get(name).unwrap().entity)
+                .unwrap()
+                .answer()
+                .unwrap_or("")
+                .to_string()
+        };
+        (answer("alpha"), answer("beta"))
+    }
+
+    let journal = Journal::new();
+    let ships = Arc::new(AtomicUsize::new(0));
+
+    let (mut record_app, record_roster) =
+        build_app(FanProvider { calls: Mutex::new(0) }, journal.clone(), ships.clone()).await;
+    assert_eq!(record_app.run(12).await.unwrap(), StopReason::Settled);
+    let recorded_result = record_app.world().resource::<FanOutResult>().unwrap().0.clone();
+    let (recorded_alpha, recorded_beta) = answers(&record_app, &record_roster);
+    assert_eq!(ships.load(Ordering::SeqCst), 2, "each agent shipped once while recording");
+    assert_ne!(recorded_alpha, recorded_beta, "the provider gave different answers");
+
+    let (mut replay_app, replay_roster) =
+        build_app(ReplayProvider::new(journal.clone()), journal, ships.clone()).await;
+    assert_eq!(replay_app.run(12).await.unwrap(), StopReason::Settled);
+    let replayed_result = replay_app.world().resource::<FanOutResult>().unwrap().0.clone();
+    let (replayed_alpha, replayed_beta) = answers(&replay_app, &replay_roster);
+
+    assert_eq!(replayed_alpha, recorded_alpha, "alpha replays its own answer");
+    assert_eq!(replayed_beta, recorded_beta, "beta replays its own answer");
+    assert_eq!(replayed_result, recorded_result, "the reduced fan-out answer is identical");
+    assert_eq!(
+        ships.load(Ordering::SeqCst),
+        2,
+        "replay must not re-run the deploy side effect"
+    );
+}

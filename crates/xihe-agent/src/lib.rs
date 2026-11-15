@@ -13,6 +13,7 @@ pub mod llm;
 pub mod memory;
 pub mod output;
 pub mod react;
+pub mod replay;
 pub mod tool;
 
 pub use error::AgentError;
@@ -22,6 +23,7 @@ pub use llm::LlmService;
 pub use memory::{ChatSummariser, MemoryService, fold_window, recall_context, recall_lines};
 pub use output::{ResponseFormat, missing_required_keys, parse_json};
 pub use react::{AgentStatus, React, ReactAgent};
+pub use replay::{Journal, ReplayProvider};
 pub use tool::{
     Clock, EchoTool, FixedClock, FnTool, LookupTool, NowTool, SystemClock, Tool, ToolContext,
     ToolOutcome, ToolRegistry,

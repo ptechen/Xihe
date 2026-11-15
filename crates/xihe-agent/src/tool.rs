@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use xihe_core::Entity;
 use xihe_llm::{ToolCall, ToolDescriptor};
@@ -101,7 +102,7 @@ impl ToolContext {
 }
 
 /// The result of running a tool.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutcome {
     /// False when the tool ran and reported a problem.
     pub ok: bool,

@@ -1,7 +1,7 @@
 //! Conversation state: bounded history, prompt assembly and folding.
 
 use serde::{Deserialize, Serialize};
-use xihe_llm::{ChatMessage, Role};
+use xihe_llm::{ChatMessage, Role, ToolCall};
 
 use crate::error::MemoryResult;
 use crate::reflection::Summariser;
@@ -65,6 +65,10 @@ pub struct Turn {
     /// Call id, kept so a tool turn can be matched with its request.
     #[serde(default)]
     pub call_id: Option<String>,
+    /// Calls an assistant turn asked for, kept so replaying the transcript
+    /// still answers each tool result with the call that produced it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 impl Turn {
@@ -75,6 +79,7 @@ impl Turn {
             content: content.into(),
             author: None,
             call_id: None,
+            tool_calls: Vec::new(),
         }
     }
 
@@ -102,6 +107,12 @@ impl Turn {
         self
     }
 
+    /// Attach the calls an assistant turn asked the runtime to execute.
+    pub fn with_tool_calls(mut self, calls: Vec<ToolCall>) -> Self {
+        self.tool_calls = calls;
+        self
+    }
+
     /// Convert into a chat message for the provider.
     pub fn to_message(&self) -> ChatMessage {
         let mut message = ChatMessage::new(self.speaker.role(), self.content.clone());
@@ -111,6 +122,7 @@ impl Turn {
         if let Some(call_id) = &self.call_id {
             message.tool_call_id = Some(call_id.clone());
         }
+        message.tool_calls = self.tool_calls.clone();
         message
     }
 
@@ -121,12 +133,17 @@ impl Turn {
             content: message.content.clone(),
             author: message.name.clone(),
             call_id: message.tool_call_id.clone(),
+            tool_calls: message.tool_calls.clone(),
         }
     }
 
     /// Rough token size, for budget arithmetic.
     pub fn tokens(&self) -> usize {
-        message_size(&self.content, self.author.as_deref())
+        let mut size = message_size(&self.content, self.author.as_deref());
+        for call in &self.tool_calls {
+            size += message_size(&call.render(), None);
+        }
+        size
     }
 }
 
@@ -256,6 +273,7 @@ impl ConversationWindow {
         while self.turns.len() > self.max_turns {
             dropped.push(self.turns.remove(0));
         }
+        self.drop_orphaned_leading_tools(&mut dropped);
         dropped
     }
 
@@ -265,7 +283,20 @@ impl ConversationWindow {
         while self.tokens() > self.max_tokens && self.turns.len() > 2 {
             dropped.push(self.turns.remove(0));
         }
+        self.drop_orphaned_leading_tools(&mut dropped);
         dropped
+    }
+
+    /// A tool result whose assistant call was trimmed away cannot be replayed
+    /// on its own, so drop it too rather than emit a malformed prompt.
+    fn drop_orphaned_leading_tools(&mut self, dropped: &mut Vec<Turn>) {
+        while self
+            .turns
+            .first()
+            .is_some_and(|turn| turn.speaker == Speaker::Tool)
+        {
+            dropped.push(self.turns.remove(0));
+        }
     }
 
     /// Apply whichever budget is tighter.
@@ -288,7 +319,15 @@ impl ConversationWindow {
         if self.turns.len() <= keep_last {
             return Ok(self.folded_summary.clone());
         }
-        let stale_count = self.turns.len() - keep_last;
+        let mut stale_count = self.turns.len() - keep_last;
+        // Never start the kept region on a tool result: back up to the call that
+        // requested it, so a fold boundary cannot orphan a tool turn.
+        while stale_count > 0 && self.turns[stale_count].speaker == Speaker::Tool {
+            stale_count -= 1;
+        }
+        if stale_count == 0 {
+            return Ok(self.folded_summary.clone());
+        }
         let stale: Vec<Turn> = self.turns.drain(..stale_count).collect();
         let mut transcript = String::new();
         if let Some(previous) = &self.folded_summary {
@@ -538,6 +577,77 @@ mod tests {
         let summary = window.fold(&HeuristicSummariser::new(2, 200), 4).await.unwrap();
         assert!(summary.is_none());
         assert_eq!(window.turns().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn folding_keeps_a_tool_result_with_its_call() {
+        let mut window = ConversationWindow::new().with_max_turns(100);
+        for index in 0..4 {
+            window.push_assistant(format!("calling tool {index}"));
+            window.push(Turn::tool(format!("c{index}"), format!("result {index}")));
+        }
+        // Eight turns; keep_last=5 naively starts the kept region on tool `c1`,
+        // orphaning it from the assistant call that asked for it.
+        let summary = window
+            .fold(&HeuristicSummariser::new(2, 200), 5)
+            .await
+            .unwrap();
+        assert!(summary.is_some(), "folding still happens");
+        assert_ne!(
+            window.turns()[0].speaker,
+            Speaker::Tool,
+            "a tool result must keep the call that requested it"
+        );
+        assert_eq!(window.turns()[0].content, "calling tool 1");
+        assert_eq!(
+            window.fold_count(),
+            2,
+            "only the first complete call/result pair is folded"
+        );
+    }
+
+    fn assert_no_orphan_tools(window: &ConversationWindow) {
+        let turns = window.turns();
+        for (index, turn) in turns.iter().enumerate() {
+            if turn.speaker != Speaker::Tool {
+                continue;
+            }
+            let id = turn.call_id.as_deref().expect("a tool turn names its call");
+            let answered = turns[..index]
+                .iter()
+                .any(|prior| prior.tool_calls.iter().any(|call| call.id == id));
+            assert!(
+                answered,
+                "tool result {id} was orphaned from its call: {turns:?}"
+            );
+        }
+    }
+
+    fn tool_dialogue(window: &mut ConversationWindow, rounds: usize) {
+        for index in 0..rounds {
+            window.push(
+                Turn::assistant(format!("calling tool {index}")).with_tool_calls(vec![
+                    ToolCall::new(format!("c{index}"), "echo", serde_json::json!({})),
+                ]),
+            );
+            window.push(Turn::tool(format!("c{index}"), format!("result {index}")));
+        }
+    }
+
+    #[test]
+    fn turn_trim_keeps_a_tool_result_with_its_call() {
+        let mut window = ConversationWindow::new().with_max_turns(5);
+        tool_dialogue(&mut window, 6);
+        assert_no_orphan_tools(&window);
+    }
+
+    #[test]
+    fn token_trim_keeps_a_tool_result_with_its_call() {
+        let mut window = ConversationWindow::new()
+            .with_max_turns(100)
+            .with_max_tokens(39);
+        tool_dialogue(&mut window, 6);
+        assert_no_orphan_tools(&window);
     }
 
     #[test]

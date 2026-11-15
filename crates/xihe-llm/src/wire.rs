@@ -398,6 +398,20 @@ mod tests {
     }
 
     #[test]
+    fn correlation_never_reaches_the_wire() {
+        let request = GenerationRequest::new("m")
+            .with_user("hi")
+            .with_correlation("scribe", 3);
+        let body = to_wire(&request, "m");
+        assert!(
+            body.get("correlation").is_none(),
+            "record-and-replay metadata must not be sent to the provider: {body}"
+        );
+        assert!(body.get("agent").is_none());
+        assert!(body.get("turn").is_none());
+    }
+
+    #[test]
     fn tool_choice_without_tools_is_still_sent() {
         let request = GenerationRequest::new("m")
             .with_user("hi")

@@ -668,6 +668,10 @@ pub struct FanOutResult(pub String);
 ///
 /// Dispatches on the first frame, then waits for every branch to finish before
 /// writing a [`FanOutResult`] resource.
+///
+/// Add it after [`xihe_agent::React`]: it reduces once the branches finish, so
+/// running it before React lets the driver settle in the dispatch frame, before
+/// the reduce ever runs.
 pub struct FanOutTask {
     fan: FanOut,
     roster: Roster,
