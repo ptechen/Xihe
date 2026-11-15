@@ -396,7 +396,17 @@ mod tests {
     async fn each_activation_runs_in_a_named_system_span() {
         let capture = SpanCapture::default();
         let seen = capture.names.clone();
+        // tracing caches each callsite's interest process-wide. With a single
+        // registered subscriber it rebuilds that cache against the thread-local
+        // default of whichever thread happens to trigger a rebuild, so parallel
+        // tests running on the no-op subscriber race to flip the shared `system`
+        // callsite to `never` and these spans vanish nondeterministically. A
+        // second registered subscriber forces the thread-independent
+        // dispatcher-list rebuild path, keeping the capture's interest stable no
+        // matter which thread rebuilds; the outer one only exists to do that.
+        let _outer = tracing::subscriber::set_default(SpanCapture::default());
         let _guard = tracing::subscriber::set_default(capture);
+        tracing::callsite::rebuild_interest_cache();
         let ctx = SystemContext::new(crate::context::WorldHandle::empty());
 
         let mut ok = system("alpha", |_ctx: SystemContext| async { Ok(()) });
