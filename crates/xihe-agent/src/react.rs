@@ -1,22 +1,21 @@
-//! The ReAct loop: reason, act, observe — until an answer or a limit.
+//! ReAct 循环：推理、行动、观察——直到一个回答或一个限额。
 //!
-//! An agent is an entity carrying a [`ReactAgent`] component. The component
-//! owns the conversation, the counters and the outcome; [`React`] is a
-//! [`xihe_schedule::System`] that reads those components, calls the provider,
-//! runs the tools and writes the result back. Nothing in the component talks to
-//! the outside world, which is what makes an agent replayable: point a
-//! [`xihe_llm::MockProvider`](xihe_llm::MockProvider) at it and the same
-//! transcript comes out.
+//! 一个智能体是携带 [`ReactAgent`] 组件的实体。该组件拥有对话、
+//! 计数器与结果；[`React`] 是一个 [`xihe_schedule::System`]，读取这些
+//! 组件、调用提供方、运行工具并把结果写回。组件中没有任何东西
+//! 与外部世界对话，这正是智能体可回放的原因：把一个
+//! [`xihe_llm::MockProvider`](xihe_llm::MockProvider) 指向它，
+//! 同样的转录就会出来。
 //!
-//! # Lock discipline
+//! # 锁纪律
 //!
-//! [`React`] never holds the world lock across an await on the provider or a
-//! tool. A step is read-lock → snapshot → release → talk → write-lock → apply,
-//! and the apply checks that the agent it is writing to is the one it planned
-//! for (same turn count, same status). If anything else moved the agent in the
-//! meantime, the step is dropped instead of applied to stale state.
+//! [`React`] 绝不在对提供方或工具的 await 期间持有世界锁。
+//! 一个步骤是 读锁 → 快照 → 释放 → 对话 → 写锁 → 应用，
+//! 应用时检查它正写入的智能体就是它当初规划的那个（相同轮计数、
+//! 相同状态）。若期间有别的任何东西移动了该智能体，步骤被丢弃，
+//! 而非应用到过期状态。
 //!
-//! # Running one
+//! # 运行一个
 //!
 //! ```
 //! use serde_json::json;
@@ -75,34 +74,34 @@ use crate::output::ResponseFormat;
 use crate::replay::{approval_key, Journal};
 use crate::tool::{ToolContext, ToolOutcome, ToolRegistry};
 
-/// Where the agent is in its task.
+/// 智能体在其任务中所处的位置。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AgentStatus {
-    /// Nothing has been asked of it.
+    /// 尚未向它请求任何事。
     #[default]
     Idle,
-    /// The loop owes the agent a model call, a tool run, or both.
+    /// 循环欠该智能体一次模型调用、一次工具运行，或两者。
     Working,
-    /// A tool is waiting on a human; see [`ReactAgent::awaiting`].
+    /// 一个工具正在等待人；见 [`ReactAgent::awaiting`]。
     AwaitingApproval,
-    /// The task ended with an answer.
+    /// 任务以一个回答结束。
     Finished,
-    /// The task ended without one.
+    /// 任务没有回答就结束。
     Failed,
 }
 
 impl AgentStatus {
-    /// Whether the loop will leave this agent alone.
+    /// 循环是否会不再管这个智能体。
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Finished | Self::Failed)
     }
 
-    /// Whether the loop may still act on this agent.
+    /// 循环是否仍可对这个智能体行动。
     pub fn is_open(self) -> bool {
         !self.is_terminal()
     }
 
-    /// Stable lowercase name for logs and metrics.
+    /// 用于日志与指标的稳定小写名字。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -120,7 +119,7 @@ impl Display for AgentStatus {
     }
 }
 
-/// Everything one ReAct agent carries.
+/// 一个 ReAct 智能体携带的一切。
 #[derive(Clone, Debug)]
 pub struct ReactAgent {
     name: String,
@@ -142,7 +141,7 @@ pub struct ReactAgent {
 }
 
 impl ReactAgent {
-    /// An idle agent with `instructions` as its standing system prompt.
+    /// 一个空闲智能体，以 `instructions` 作为其常驻系统提示词。
     pub fn new(name: impl Into<String>, instructions: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -164,21 +163,21 @@ impl ReactAgent {
         }
     }
 
-    /// Ask a different model than the service default.
+    /// 请求一个不同于服务默认的模型。
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
     }
 
-    /// Replace the ceilings.
+    /// 替换上限。
     #[must_use]
     pub fn with_guardrails(mut self, guardrails: Guardrails) -> Self {
         self.guardrails = guardrails;
         self
     }
 
-    /// Require the final answer to match `format`.
+    /// 要求最终回答匹配 `format`。
     #[must_use]
     pub fn with_format(mut self, format: ResponseFormat) -> Self {
         self.repairs_left = format.repairs();
@@ -186,14 +185,14 @@ impl ReactAgent {
         self
     }
 
-    /// Replace the conversation window, e.g. to change its token budget.
+    /// 替换对话窗口，例如更改其 token 预算。
     #[must_use]
     pub fn with_window(mut self, conversation: ConversationWindow) -> Self {
         self.conversation = conversation;
         self
     }
 
-    /// Ask the agent something, starting a fresh task if the last one ended.
+    /// 问智能体某事，若上一个任务已结束则开始一个新任务。
     #[must_use]
     pub fn ask(mut self, question: impl Into<String>) -> Self {
         self.begin();
@@ -202,19 +201,19 @@ impl ReactAgent {
         self
     }
 
-    /// Queue a question without moving a builder chain along.
+    /// 排入一个问题，而不推进构建器链。
     pub fn push_question(&mut self, question: impl Into<String>) {
         self.begin();
         self.conversation.push_user(question);
         self.status = AgentStatus::Working;
     }
 
-    /// Append something the model should see before answering.
+    /// 追加模型在回答前应看到的内容。
     pub fn observe(&mut self, content: impl Into<String>) {
         self.conversation.push_user(content);
     }
 
-    /// Zero the counters and start the clock, unless a task is still open.
+    /// 清零计数器并启动时钟，除非一个任务仍未结。
     fn begin(&mut self) {
         let fresh = self.status.is_terminal() || self.status == AgentStatus::Idle;
         if fresh {
@@ -232,67 +231,67 @@ impl ReactAgent {
         }
     }
 
-    /// The agent's name.
+    /// 智能体的名字。
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Where the loop stands.
+    /// 循环所处的位置。
     pub fn status(&self) -> AgentStatus {
         self.status
     }
 
-    /// The final answer, once the task is finished.
+    /// 最终回答，一旦任务完成。
     pub fn answer(&self) -> Option<&str> {
         self.answer.as_deref()
     }
 
-    /// The answer parsed as JSON, when the format asked for one.
+    /// 解析为 JSON 的回答，当格式要求一个时。
     pub fn structured(&self) -> Option<&Value> {
         self.parsed.as_ref()
     }
 
-    /// Why the task failed.
+    /// 任务为何失败。
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
-    /// Model calls spent so far.
+    /// 迄今花费的模型调用。
     pub fn turns(&self) -> usize {
         self.spend.turns
     }
 
-    /// What the agent has spent.
+    /// 智能体已花费什么。
     pub fn spend(&self) -> Spend {
         self.spend
     }
 
-    /// The ceilings in force.
+    /// 生效的上限。
     pub fn guardrails(&self) -> &Guardrails {
         &self.guardrails
     }
 
-    /// The answer format in force.
+    /// 生效的回答格式。
     pub fn format(&self) -> &ResponseFormat {
         &self.format
     }
 
-    /// The transcript the agent is working from.
+    /// 智能体据以工作的转录。
     pub fn conversation(&self) -> &ConversationWindow {
         &self.conversation
     }
 
-    /// The transcript, mutable, for callers that seed or trim it directly.
+    /// 可变的转录，供直接播种或裁剪它的调用者。
     pub fn conversation_mut(&mut self) -> &mut ConversationWindow {
         &mut self.conversation
     }
 
-    /// The request waiting for a human, while the loop is parked.
+    /// 循环挂起时，正在等待人的请求。
     pub fn awaiting(&self) -> Option<&ApprovalRequest> {
         self.awaiting.as_ref()
     }
 
-    /// The call the model made that is waiting for a human.
+    /// 模型做出、正在等待人的那次调用。
     pub fn pending_call(&self) -> Option<&ToolCall> {
         match self.awaiting.as_ref() {
             Some(request) => Some(&request.call),
@@ -300,22 +299,22 @@ impl ReactAgent {
         }
     }
 
-    /// Wall-clock time spent on the current task.
+    /// 当前任务花费的墙钟时间。
     pub fn elapsed(&self) -> Duration {
         self.started.map_or(Duration::ZERO, |started| started.elapsed())
     }
 
-    /// Tool calls that came back failing.
+    /// 返回时失败的工具调用。
     pub fn tool_errors(&self) -> usize {
         self.tool_errors
     }
 
-    /// Repair chances left for a malformed answer.
+    /// 畸形回答剩余的修复机会。
     pub fn repairs_left(&self) -> usize {
         self.repairs_left
     }
 
-    /// A one-line summary for logs.
+    /// 用于日志的一行摘要。
     pub fn summary(&self) -> String {
         format!(
             "{}: {} turns={}, tools={}",
@@ -323,7 +322,7 @@ impl ReactAgent {
         )
     }
 
-    /// The system prompt actually sent: instructions plus the answer format.
+    /// 实际发送的系统提示词：指令加上回答格式。
     pub fn system_text(&self) -> String {
         match self.format.instruction() {
             Some(extra) if !self.instructions.is_empty() => {
@@ -334,8 +333,7 @@ impl ReactAgent {
         }
     }
 
-    /// Whether a model call is owed: something was said that the model has not
-    /// answered yet.
+    /// 是否欠一次模型调用：说了某事而模型尚未回答。
     pub fn awaits_model(&self) -> bool {
         if self.status != AgentStatus::Working {
             return false;
@@ -346,17 +344,17 @@ impl ReactAgent {
             .is_some_and(|turn| matches!(turn.speaker, Speaker::User | Speaker::Tool))
     }
 
-    /// Whether the loop is parked on a call a human has since answered.
+    /// 循环是否挂起在一个人类此后已回答的调用上。
     pub fn has_decision(&self) -> bool {
         self.status == AgentStatus::AwaitingApproval && self.decision.is_some()
     }
 
-    /// Approve the parked call; `false` when nothing was parked.
+    /// 批准挂起的调用；无挂起时为 `false`。
     pub fn approve(&mut self) -> bool {
         self.decide(Decision::Approved)
     }
 
-    /// Reject the parked call with `reason`; `false` when nothing was parked.
+    /// 以 `reason` 拒绝挂起的调用；无挂起时为 `false`。
     pub fn reject(&mut self, reason: impl Into<String>) -> bool {
         self.decide(Decision::reject(reason))
     }
@@ -369,7 +367,7 @@ impl ReactAgent {
         true
     }
 
-    /// The request for the next model call, given the tools on offer.
+    /// 给定提供的工具，下一次模型调用的请求。
     pub fn build_request(&self, descriptors: Vec<ToolDescriptor>) -> GenerationRequest {
         let mut messages = Vec::with_capacity(self.conversation.turns().len() + 1);
         let system = self.system_text();
@@ -382,8 +380,7 @@ impl ReactAgent {
             .with_tools(descriptors)
     }
 
-    /// Charge a model call and append its answer, recording calls as the text
-    /// the transcript needs.
+    /// 计费一次模型调用并追加其回答，把调用记录为转录所需的文本。
     fn record_response(&mut self, response: &GenerationResponse) {
         self.spend.record_response(response);
         let content = if response.content.trim().is_empty() {
@@ -407,17 +404,20 @@ impl ReactAgent {
         }
     }
 
-    /// Append one tool result, whether the tool ran or refused to.
+    /// 追加一个工具结果，无论工具运行了还是拒绝了。
     pub fn record_tool_result(&mut self, call: &ToolCall, outcome: &ToolOutcome) {
         if !outcome.ok {
             self.tool_errors += 1;
         }
         self.spend.record_tool_call();
-        self.conversation
-            .push(Turn::tool(call.id.clone(), outcome.transcript_text()));
+        let text = clamp_tool_output(
+            &outcome.transcript_text(),
+            self.guardrails.max_tool_output_chars,
+        );
+        self.conversation.push(Turn::tool(call.id.clone(), text));
     }
 
-    /// Accept a model answer as final, parsing it when the format asks.
+    /// 接受一个模型回答为最终答案，当格式要求时解析它。
     pub fn finish(&mut self, answer: impl Into<String>) {
         self.finish_text(answer.into());
     }
@@ -433,7 +433,7 @@ impl ReactAgent {
         self.decision = None;
     }
 
-    /// Accept a model answer that was already parsed.
+    /// 接受一个已被解析的模型回答。
     fn finish_parsed(&mut self, answer: String, value: Value) {
         self.status = AgentStatus::Finished;
         self.answer = Some(answer);
@@ -442,7 +442,7 @@ impl ReactAgent {
         self.decision = None;
     }
 
-    /// Stop the task with a reason the caller can read.
+    /// 以调用者可读的原因停止任务。
     pub fn fail(&mut self, error: &AgentError) {
         self.status = AgentStatus::Failed;
         self.error = Some(error.to_string());
@@ -450,7 +450,7 @@ impl ReactAgent {
         self.decision = None;
     }
 
-    /// Stop the task with a message that is not an [`AgentError`].
+    /// 以一条不是 [`AgentError`] 的消息停止任务。
     pub fn fail_with(&mut self, message: impl Into<String>) {
         self.status = AgentStatus::Failed;
         self.error = Some(message.into());
@@ -458,7 +458,7 @@ impl ReactAgent {
         self.decision = None;
     }
 
-    /// Park the loop on `request`, remembering the call so it can resume.
+    /// 把循环挂起在 `request` 上，记住该调用以便恢复。
     fn park(&mut self, request: ApprovalRequest) {
         self.status = AgentStatus::AwaitingApproval;
         self.awaiting = Some(request);
@@ -466,14 +466,13 @@ impl ReactAgent {
     }
 }
 
-/// The system that runs the loop.
+/// 运行循环的系统。
 ///
-/// One activation advances every busy agent through up to [`React::steps`]
-/// reason-act rounds. Agents progress independently: each call runs outside the
-/// world lock and is written back the moment it completes, so a fast agent never
-/// waits on a slow one. Calls in flight together are applied one at a time, and
-/// the journal keys each by a stable per-agent identity, so the final state is
-/// deterministic even though completion order is not.
+/// 一次激活把每个忙碌的智能体推进至多 [`React::steps`] 个
+/// 推理-行动轮。智能体独立推进：每次调用在世界锁之外运行，
+/// 完成的那一刻即被写回，因此快的智能体绝不等慢的。
+/// 同时在飞的调用被逐个应用，日志以稳定的每智能体身份为每个键，
+/// 因此最终状态是确定的，尽管完成顺序不是。
 pub struct React {
     name: String,
     steps: usize,
@@ -490,7 +489,7 @@ impl Default for React {
 }
 
 impl React {
-    /// Advance each busy agent up to 8 rounds per activation.
+    /// 每次激活把每个忙碌智能体推进至多 8 轮。
     pub fn new() -> Self {
         Self {
             name: "react".to_string(),
@@ -502,39 +501,39 @@ impl React {
         }
     }
 
-    /// Name the system, which matters once several loops share a schedule.
+    /// 命名系统，一旦多个循环共享一个调度器这就重要了。
     #[must_use]
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
     }
 
-    /// Rounds per activation; `0` is treated as one.
+    /// 每次激活的轮数；`0` 被视为一。
     #[must_use]
     pub fn with_steps(mut self, steps: usize) -> Self {
         self.steps = steps.max(1);
         self
     }
 
-    /// Answer approval requests instead of parking.
+    /// 回答审批请求而非挂起。
     #[must_use]
     pub fn with_approver<A: Approver + 'static>(mut self, approver: A) -> Self {
         self.approver = Some(Arc::new(approver));
         self
     }
 
-    /// Share an approver handle, e.g. one gate in front of several loops.
+    /// 共享一个审批器句柄，例如多个循环前的同一道闸。
     #[must_use]
     pub fn with_shared_approver(mut self, approver: Arc<dyn Approver>) -> Self {
         self.approver = Some(approver);
         self
     }
 
-    /// Fold conversations longer than `threshold` turns, keeping the last
-    /// `keep_last` turns verbatim. `0` disables folding.
+    /// 折叠长于 `threshold` 轮的对话，逐字保留最后 `keep_last` 轮。
+    /// `0` 禁用折叠。
     ///
-    /// When an [`LlmService`] is present the fold asks the model to summarise;
-    /// otherwise it falls back to sentence ranking.
+    /// 当存在 [`LlmService`] 时，折叠请模型做摘要；
+    /// 否则回退到句子排名。
     #[must_use]
     pub fn with_fold(mut self, threshold: usize, keep_last: usize) -> Self {
         self.fold_threshold = threshold;
@@ -542,11 +541,11 @@ impl React {
         self
     }
 
-    /// Forward every streamed chunk to `sink` as it arrives.
+    /// 每个流式块到达时即转发给 `sink`。
     ///
-    /// When set, the loop uses [`ChatClient::stream`] instead of
-    /// [`ChatClient::generate`], accumulating the full response for its own
-    /// decision-making while the caller observes tokens incrementally.
+    /// 设置后，循环使用 [`ChatClient::stream`] 而非
+    /// [`ChatClient::generate`]，为自身决策累积完整响应，
+    /// 同时调用者增量地观察 token。
     #[must_use]
     pub fn with_stream_sink(
         mut self,
@@ -556,7 +555,7 @@ impl React {
         self
     }
 
-    /// Rounds this system is willing to run per activation.
+    /// 本系统每次激活愿意运行的轮数。
     pub fn steps(&self) -> usize {
         self.steps
     }
@@ -587,9 +586,9 @@ impl System for React {
     }
 
     async fn run(&mut self, ctx: SystemContext) -> SysResult {
-        // A pool of in-flight steps. Each outcome is applied the moment it
-        // completes and only that agent is re-planned, so agents advance at
-        // their own pace instead of waiting on the slowest call in a round.
+        // 一个在飞步骤的池。每个结果在完成的那一刻被应用，
+        // 且只重新规划那个智能体，因此智能体按自己的节奏推进，
+        // 而非等待一轮中最慢的调用。
         let mut pool: FuturesUnordered<Pin<Box<dyn Future<Output = Outcome> + Send>>> =
             FuturesUnordered::new();
         let mut rounds: HashMap<Entity, usize> = HashMap::new();
@@ -611,8 +610,8 @@ impl System for React {
                 stop_agents(&ctx).await;
                 break;
             }
-            // Race the in-flight calls against shutdown: a stop signalled
-            // mid-generation drops the provider future rather than waiting it out.
+            // 让在飞调用与关停竞速：生成中途发出的停止信号
+            // 会丢弃提供方 future，而非等它结束。
             let next = tokio::select! {
                 next = pool.next() => next,
                 _ = ctx.stop_token().wait() => {
@@ -644,7 +643,7 @@ impl System for React {
     }
 }
 
-/// Run one planned step to its outcome, outside the world lock.
+/// 在世界锁之外，把一个已规划步骤运行到其结果。
 async fn run_step(step: Step) -> Outcome {
     match step {
         Step::Generate(generation) => (*generation).execute().await,
@@ -653,7 +652,7 @@ async fn run_step(step: Step) -> Outcome {
     }
 }
 
-/// A step that owes the world a model call.
+/// 欠世界一次模型调用的步骤。
 struct Generation {
     entity: Entity,
     turn: usize,
@@ -670,7 +669,7 @@ struct Generation {
     journal: Option<Journal>,
 }
 
-/// A step that continues a parked call a human has answered.
+/// 继续一个人类已回答之挂起调用的步骤。
 struct Resume {
     entity: Entity,
     turn: usize,
@@ -688,23 +687,23 @@ enum Step {
     Fail { entity: Entity, error: AgentError },
 }
 
-/// What a step produced, ready to be written back.
+/// 一个步骤产出了什么，已准备好写回。
 enum Outcome {
-    /// A final text answer.
+    /// 一个最终文本回答。
     Answered {
         entity: Entity,
         turn: usize,
         response: Box<GenerationResponse>,
         parsed: Option<Value>,
     },
-    /// A usable-looking answer that the format rejected; ask again.
+    /// 一个看起来可用、却被格式拒绝的回答；再问一次。
     Repaired {
         entity: Entity,
         turn: usize,
         response: Box<GenerationResponse>,
         repair: String,
     },
-    /// The model called tools; their results are ready to append.
+    /// 模型调用了工具；其结果已准备好追加。
     Acted {
         entity: Entity,
         turn: usize,
@@ -713,7 +712,7 @@ enum Outcome {
         refused: usize,
         parked: Option<ApprovalRequest>,
     },
-    /// A parked call was decided; its result is ready to append.
+    /// 一个挂起的调用已被决定；其结果已准备好追加。
     Observed {
         entity: Entity,
         turn: usize,
@@ -721,15 +720,15 @@ enum Outcome {
         refused: usize,
         parked: Option<ApprovalRequest>,
     },
-    /// The task is over and did not produce an answer.
+    /// 任务已结束且未产出回答。
     Failed {
         entity: Entity,
         error: AgentError,
     },
 }
 
-/// Collect a step for every agent that owes one, releasing the lock before
-/// returning so the calls can run concurrently.
+/// 为每个欠一个步骤的智能体收集步骤，返回前释放锁，
+/// 使调用能并发运行。
 async fn plan_batch(
     ctx: &SystemContext,
     approver: Option<Arc<dyn Approver>>,
@@ -764,8 +763,8 @@ async fn plan_batch(
     .await
 }
 
-/// Collect the next step for a single agent, so it can advance without waiting
-/// on the others. Returns `None` once the agent no longer owes a call.
+/// 为单个智能体收集下一步，使它无需等待其他智能体即可推进。
+/// 一旦该智能体不再欠调用，返回 `None`。
 async fn plan_one(
     ctx: &SystemContext,
     entity: Entity,
@@ -796,9 +795,8 @@ async fn plan_one(
     .await
 }
 
-/// Build the step one agent owes, or `None` when it is settled or parked without
-/// a decision. Shared by the batch seed and the per-agent continuation so both
-/// plan identically.
+/// 构建一个智能体所欠的步骤，当它已落定或无决定地挂起时为 `None`。
+/// 由批量播种与每智能体续行共享，使两者规划一致。
 #[allow(clippy::too_many_arguments)]
 fn step_for(
     entity: Entity,
@@ -859,7 +857,7 @@ fn step_for(
 }
 
 impl Generation {
-    /// One model call plus the tool round it asks for.
+    /// 一次模型调用，加上它请求的工具轮。
     async fn execute(self) -> Outcome {
         let response = if let Some(sink) = &self.stream_sink {
             match self.client.stream(&self.request).await {
@@ -958,7 +956,7 @@ impl Generation {
         }
     }
 
-    /// Turn a text answer into a finished task, a repair round, or a failure.
+    /// 把一个文本回答变成已完成的任务、一个修复轮，或一次失败。
     fn settle(self, response: Box<GenerationResponse>) -> Outcome {
         let content = response.content.clone();
         if self.format.is_text() {
@@ -1002,12 +1000,11 @@ impl Generation {
 }
 
 impl Resume {
-    /// Run (or refuse) the parked call, then carry on with whatever follows.
+    /// 运行（或拒绝）挂起的调用，然后继续其后的任何事。
     ///
-    /// When the recording journal parked this approval, the whole round — the
-    /// results already in hand plus what the decision produces — is journaled
-    /// under the original request, so a replay feeds it back without asking a
-    /// human again or re-running the approved tool.
+    /// 当录制日志挂起了此审批时，整轮——已在手的结果加上决定
+    /// 所产出的——被记入原请求之下，因此回放反馈它，
+    /// 无需再次询问人或重新运行已批准的工具。
     async fn execute(self) -> Outcome {
         let call = self.request.call.clone();
         let session = self.tool_ctx.session.as_deref().unwrap_or_default();
@@ -1081,15 +1078,14 @@ impl Resume {
     }
 }
 
-/// Run calls in the order the model asked for them.
+/// 按模型请求的顺序运行调用。
 ///
-/// When every call is read-only, registered, approved and within budget, they
-/// run concurrently. Otherwise they run sequentially: a model that asks for two
-/// calls usually means the second to see the first, and a tool that writes
-/// cannot be rolled back if the loop stops halfway.
+/// 当每个调用都只读、已注册、已批准且在预算内时，它们并发运行。
+/// 否则顺序运行：请求两个调用的模型通常意在让第二个看到第一个，
+/// 而一个写入的工具若循环中途停止则无法回滚。
 ///
-/// Returns the results, how many calls were refused outright, and a request to
-/// park on if a call needs a human that no [`Approver`] can supply.
+/// 返回结果、被直接拒绝的调用数，以及当某调用需要人而
+/// 没有 [`Approver`] 能提供时、用以挂起的请求。
 async fn run_calls(
     entity: Entity,
     turn: usize,
@@ -1189,11 +1185,10 @@ async fn run_calls(
     (results, refused, None)
 }
 
-/// Write an outcome back, returning whether anything changed.
+/// 把一个结果写回，返回是否有任何改变。
 ///
-/// The turn count and status are checked first: a step planned against turn 3
-/// is worthless once the agent is on turn 4, and applying it would duplicate
-/// tool results in the transcript.
+/// 先检查轮计数与状态：针对轮 3 规划的步骤，一旦智能体到了轮 4
+/// 就毫无价值，应用它会在转录中重复工具体结果。
 async fn apply(ctx: SystemContext, outcome: Outcome) -> bool {
     let expected_turn = match &outcome {
         Outcome::Answered { turn, .. }
@@ -1351,10 +1346,10 @@ fn model_event(provider: &str, response: &GenerationResponse, failed: bool) -> E
     }
 }
 
-/// Fold every conversation that has grown past `threshold`, outside the lock.
+/// 在锁之外，折叠每个已增长超过 `threshold` 的对话。
 ///
-/// Windows are cloned under a read lock, summarised concurrently, then written
-/// back under a write lock only if the agent is still on the same turn.
+/// 窗口在读锁下被克隆、并发摘要，然后仅当智能体仍在同一轮时
+/// 才在写锁下写回。
 async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) {
     let service = LlmService::read(ctx).await;
     let (journal, snapshots): (Option<Journal>, Vec<(Entity, usize, String, ConversationWindow)>) =
@@ -1381,9 +1376,9 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
     if snapshots.is_empty() {
         return;
     }
-    // One summariser per agent: the fold's model call carries that agent's
-    // correlation so a recorded fold replays into the right window, even when
-    // several agents fold identical transcripts in the same activation.
+    // 每智能体一个摘要器：折叠的模型调用携带该智能体的关联标识，
+    // 使录制的折叠回放进正确的窗口，即便多个智能体在同一次激活中
+    // 折叠相同的转录。
     let folded = futures::future::join_all(snapshots.into_iter().map(
         |(entity, turn, name, mut window)| {
             let service = service.clone();
@@ -1430,8 +1425,8 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
 async fn update_work(ctx: &SystemContext, label: &str) {
     let busy = ctx
         .with_world(|world| {
-            // A parked agent waits on a human, not on compute; only a park a
-            // human has already decided still owes a resume.
+            // 挂起的智能体等待的是人，而非算力；只有人类已决定的
+            // 挂起仍欠一次恢复。
             world
                 .query::<&ReactAgent>()
                 .any(|agent| agent.status == AgentStatus::Working || agent.has_decision())
@@ -1451,12 +1446,12 @@ fn outcome_entity(outcome: &Outcome) -> Entity {
     }
 }
 
-/// Whether this outcome must match the turn it was planned against.
+/// 此结果是否必须匹配它当初规划所针对的轮。
 fn outcome_turns(outcome: &Outcome) -> bool {
     !matches!(outcome, Outcome::Failed { .. })
 }
 
-/// The answer text, falling back to the calls made when the model said nothing.
+/// 回答文本，当模型什么也没说时回退到所做的调用。
 fn answer_text(response: &GenerationResponse) -> String {
     if response.content.trim().is_empty() {
         let names = response
@@ -1474,7 +1469,22 @@ fn answer_text(response: &GenerationResponse) -> String {
     response.content.clone()
 }
 
-/// The context tools are run with: who asked, which turn, and what memory.
+/// 限制单个工具结果的转录文本，标记被丢弃的尾部，使模型知道
+/// 输出不完整。`0` 保留全部。完整结果仍在日志中传输；只有面向
+/// 提示词的副本被裁剪，录制与回放时完全一致。
+fn clamp_tool_output(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return text.to_string();
+    }
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max_chars).collect();
+    format!("{kept}\n[output truncated: {} more chars omitted]", total - max_chars)
+}
+
+/// 运行工具时所带的上下文：谁请求、哪一轮、什么记忆。
 fn tool_context(entity: Entity, agent: &ReactAgent, store: Option<&MemoryService>) -> ToolContext {
     let context = ToolContext::new(entity)
         .with_session(agent.name.clone())
@@ -1485,7 +1495,7 @@ fn tool_context(entity: Entity, agent: &ReactAgent, store: Option<&MemoryService
     }
 }
 
-/// Tell every busy agent that the runtime is shutting down.
+/// 告知每个忙碌的智能体：运行时正在关停。
 async fn stop_agents(ctx: &SystemContext) {
     let reason = ctx
         .stop_token()
@@ -1645,10 +1655,9 @@ mod tests {
 
         use crate::replay::{Journal, ReplayProvider};
 
-        // A provider whose answer changes on every call. Re-running it would
-        // not reproduce the first run, so an identical replay proves the
-        // journal fed the recorded responses back rather than the model
-        // answering again.
+        // 一个每次调用回答都变的提供方。重新运行它不会复现第一次运行，
+        // 因此一次相同的回放证明日志反馈了录制的响应，
+        // 而非模型再次作答。
         struct VaryingProvider {
             calls: Mutex<usize>,
         }
@@ -1722,9 +1731,9 @@ mod tests {
 
         use crate::replay::{Journal, ReplayProvider};
 
-        // A different answer on every call. Two agents with the same
-        // instructions and the same question issue byte-identical requests, so
-        // only a stable per-agent key can keep their recorded answers apart.
+        // 每次调用给出不同回答。两个指令相同、问题相同的智能体
+        // 发出逐字节相同的请求，因此只有稳定的每智能体键
+        // 才能把它们录制的回答分开。
         struct CountingProvider {
             calls: Mutex<usize>,
         }
@@ -1886,8 +1895,8 @@ mod tests {
         let recorded = only_agent(&ctx).await;
         assert_eq!(executions.load(Ordering::SeqCst), 1, "the tool ran once");
 
-        // Persist to bytes and rebuild a fresh journal from them alone: no
-        // shared state with the recording journal, as a second process would.
+        // 持久化为字节，并仅从它们重建一个新日志：与录制日志
+        // 不共享状态，正如第二个进程那样。
         let bytes = journal.to_bytes().expect("serialize the journal");
         drop(journal);
         let replay_journal = Journal::from_bytes(&bytes).expect("deserialize the journal");
@@ -1942,12 +1951,12 @@ mod tests {
         let recorded = only_agent(&ctx).await;
         assert_eq!(executions.load(Ordering::SeqCst), 1, "the tool ran once");
 
-        // Persist to a real file, then drop the recording journal entirely.
+        // 持久化到一个真实文件，然后彻底丢弃录制日志。
         let path = std::env::temp_dir().join(format!("xihe-journal-{}.json", std::process::id()));
         journal.save(&path).expect("save to disk");
         drop(journal);
 
-        // A fresh journal loaded from disk shares nothing with the recorder.
+        // 从磁盘加载的新日志与录制者不共享任何东西。
         let replay_journal = Journal::load(&path).expect("load from disk");
         std::fs::remove_file(&path).ok();
 
@@ -2066,11 +2075,10 @@ mod tests {
 
         use crate::replay::{Journal, ReplayProvider};
 
-        // A provider that answers generation calls (those offering tools) with
-        // a few tool rounds then an answer, and fold calls (no tools) with a
-        // fixed summary. The fold summary differs from anything the heuristic
-        // fallback would produce, so a replay that re-summarises instead of
-        // feeding the recorded one diverges.
+        // 一个对生成调用（提供工具的那些）以几个工具轮然后一个回答
+        // 作答、对折叠调用（无工具）以固定摘要作答的提供方。
+        // 折叠摘要不同于启发式回退会产出的任何内容，因此一次
+        // 重新摘要而非反馈录制摘要的回放会发散。
         struct FoldAwareProvider {
             generations: Mutex<usize>,
         }
@@ -2176,16 +2184,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_huge_tool_result_is_capped_in_the_prompt() {
+        use std::sync::Mutex;
+        use xihe_llm::{LlmError, Provider, Role};
+
+        // 捕获每个请求，使回答轮的提示词——把工具结果带回给模型的
+        // 那一个——可被测量。
+        struct CapturingProvider {
+            requests: Arc<Mutex<Vec<GenerationRequest>>>,
+            calls: Mutex<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for CapturingProvider {
+            fn id(&self) -> &str {
+                "capture"
+            }
+            fn default_model(&self) -> &str {
+                "capture"
+            }
+            async fn generate(
+                &self,
+                request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                self.requests.lock().unwrap().push(request.clone());
+                let mut calls = self.calls.lock().unwrap();
+                let n = *calls;
+                *calls += 1;
+                Ok(if n == 0 {
+                    GenerationResponse::default()
+                        .with_tool_calls(vec![ToolCall::new("c1", "dump", json!({}))])
+                } else {
+                    GenerationResponse::text("done")
+                })
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = CapturingProvider {
+            requests: requests.clone(),
+            calls: Mutex::new(0),
+        };
+        let mut registry = ToolRegistry::new();
+        registry.register(FnTool::new("dump", "return a lot", |_ctx, _call| {
+            ToolOutcome::text("x".repeat(100_000))
+        }));
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(LlmService::from_provider(provider));
+        world.spawn_with((ReactAgent::new("reader", "be brief").ask("read it"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the loop runs");
+        assert_eq!(only_agent(&ctx).await.status(), AgentStatus::Finished);
+
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2, "a tool round then an answer round");
+        let answer_round = &captured[1];
+        let tool_msg = answer_round
+            .messages
+            .iter()
+            .find(|message| message.role == Role::Tool)
+            .expect("the tool result is replayed to the model");
+        assert!(
+            tool_msg.content.chars().count() <= Guardrails::DEFAULT_TOOL_OUTPUT_CHARS + 64,
+            "a single huge tool result must be capped, got {} chars",
+            tool_msg.content.chars().count()
+        );
+        assert!(
+            tool_msg.content.contains("truncated"),
+            "the model must be told the output was cut: {}",
+            tool_msg.content
+        );
+        assert!(
+            answer_round.estimated_prompt_tokens() <= Guardrails::DEFAULT_TOOL_OUTPUT_CHARS / 4 + 512,
+            "the answer-round prompt must stay bounded, got {} estimated tokens",
+            answer_round.estimated_prompt_tokens()
+        );
+    }
+
+    #[test]
+    fn tool_output_clamp_marks_the_dropped_tail() {
+        assert_eq!(clamp_tool_output("short", 10), "short");
+        assert_eq!(clamp_tool_output("anything", 0), "anything", "zero keeps everything");
+        let capped = clamp_tool_output("abcdef", 3);
+        assert!(capped.starts_with("abc"), "{capped}");
+        assert!(capped.contains("truncated"), "{capped}");
+        assert!(capped.contains("3 more chars"), "{capped}");
+        let multibyte = clamp_tool_output("日本語のテキスト", 3);
+        assert!(multibyte.starts_with("日本語"), "{multibyte}");
+    }
+
+    #[tokio::test]
     async fn a_fast_agent_finishes_without_waiting_for_a_slow_one() {
         use std::time::Duration;
         use tokio::sync::Notify;
         use xihe_llm::{LlmError, Provider};
 
-        // The slow agent's call blocks until the fast agent is observed
-        // Finished. Under a round barrier the fast agent cannot be applied
-        // (and so cannot finish) until the slow call returns, which never
-        // happens: deadlock. Independent progression lets the fast agent
-        // finish on its own and open the slow agent's gate.
+        // 慢智能体的调用阻塞，直到快智能体被观察到 Finished。
+        // 在轮屏障下，快智能体无法被落定（因而无法完成），直到
+        // 慢调用返回，而那永远不会发生：死锁。独立推进让快智能体
+        // 自行完成并打开慢智能体的闸门。
         struct GateProvider {
             gate: Arc<Notify>,
         }
@@ -2222,7 +2320,7 @@ mod tests {
         world.spawn_with((ReactAgent::new("slow", "be brief").ask("hi"),));
         let ctx = SystemContext::new(WorldHandle::new(world));
 
-        // Open the slow agent's gate the moment the fast agent finishes.
+        // 在快智能体完成的那一刻打开慢智能体的闸门。
         let handle = ctx.world.clone();
         let watcher_gate = gate.clone();
         let watcher = tokio::spawn(async move {
@@ -2585,8 +2683,8 @@ mod tests {
         let run_ctx = ctx.clone();
         let handle = tokio::spawn(async move { React::new().run(run_ctx).await });
 
-        // Register interest before the task can run, then wait until the model
-        // call is genuinely in flight so the stop lands mid-call, not before it.
+        // 在任务能运行前登记 interest，然后等到模型调用真正在飞，
+        // 使停止落在调用中途，而非之前。
         let notified = started.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
@@ -2697,8 +2795,8 @@ mod tests {
             );
         }
 
-        // Zero latency strips away the model call so the lock + scheduling
-        // overhead is the only cost left: the theoretical throughput ceiling.
+        // 零延迟剥去模型调用，使锁 + 调度开销成为唯一剩下的成本：
+        // 理论吞吐上限。
         let latency = Duration::ZERO;
         println!("\nzero model latency: exposes lock + scheduling overhead alone");
         for n in [1usize, 8, 32, 64, 256] {
