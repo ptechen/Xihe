@@ -1,20 +1,20 @@
-//! Errors produced while scheduling and running systems.
+//! 调度与运行系统时产生的错误。
 
 use std::fmt;
 
-/// A system reported a failure.
+/// 某个系统报告了一次失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemError {
-    /// Name of the system that failed.
+    /// 失败系统的名称。
     pub name: String,
-    /// Short diagnostic written by the system.
+    /// 系统写下的简短诊断。
     pub reason: String,
-    /// `true` when the failure is worth retrying on the next frame.
+    /// 该失败值得在下一帧重试时为 `true`。
     pub retryable: bool,
 }
 
 impl SystemError {
-    /// Builds a failure.
+    /// 构建一次失败。
     pub fn new(name: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -23,7 +23,7 @@ impl SystemError {
         }
     }
 
-    /// Builds a failure the driver may retry.
+    /// 构建一次驱动器可重试的失败。
     pub fn retryable(name: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -66,36 +66,36 @@ impl From<&str> for SystemError {
     }
 }
 
-/// A schedule that cannot be built or run.
+/// 无法构建或运行的调度器。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScheduleError {
-    /// Two systems share a label, so ordering would be ambiguous.
+    /// 两个系统共用一个标签，排序会有歧义。
     DuplicateLabel {
-        /// The offending label.
+        /// 引发问题的标签。
         label: String,
     },
-    /// A parallel stage contains systems whose declared access overlaps.
+    /// 一个并行阶段包含声明访问权限相互重叠的系统。
     Conflict {
-        /// Name of the parallel stage.
+        /// 并行阶段的名称。
         stage: String,
-        /// First system.
+        /// 第一个系统。
         left: String,
-        /// Second system.
+        /// 第二个系统。
         right: String,
     },
-    /// An ordering hint refers to a label that is not scheduled.
+    /// 排序提示引用了一个未被调度的标签。
     UnknownLabel {
-        /// The missing label.
+        /// 缺失的标签。
         label: String,
     },
-    /// A stage has no systems.
+    /// 某阶段没有系统。
     EmptyStage {
-        /// Name or index of the empty stage.
+        /// 空阶段的名称或索引。
         stage: String,
     },
-    /// A system failed during execution.
+    /// 某系统在执行期间失败。
     Failed {
-        /// Underlying failure.
+        /// 底层失败。
         error: SystemError,
     },
 }

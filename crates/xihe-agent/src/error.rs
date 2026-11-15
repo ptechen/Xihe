@@ -1,85 +1,85 @@
-//! Failures an agent can report.
+//! 智能体可报告的失败。
 //!
-//! [`AgentError`] is the single type a ReAct run returns. It wraps the failure
-//! of whichever layer actually broke — the provider, the memory store, a tool,
-//! or the agent's own limits — and keeps the retryable flag of the innermost
-//! cause, so a caller can tell "call again" from "give up".
+//! [`AgentError`] 是一次 ReAct 运行返回的唯一类型。它包装
+//! 真正出问题的那一层——提供方、记忆存储、工具，
+//! 或智能体自身的限额——的失败，并保留最内层原因的可重试标志，
+//! 使调用者能区分“再调一次”与“放弃”。
 
 use std::fmt::{self, Display, Formatter};
 
 use xihe_llm::LlmError;
 use xihe_memory::MemoryError;
 
-/// Anything that stopped an agent from finishing a turn.
+/// 任何阻止智能体完成一轮之事。
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentError {
-    /// The provider failed; the reason is kept as text plus retryability.
+    /// 提供方失败；原因以文本加可重试性保留。
     Provider {
-        /// What the provider layer reported.
+        /// 提供方层报告了什么。
         message: String,
-        /// Whether the same request could succeed if repeated.
+        /// 同一请求若重复是否可能成功。
         retryable: bool,
     },
-    /// Memory could not be read or written.
+    /// 记忆无法读取或写入。
     Memory {
-        /// What the memory layer reported.
+        /// 记忆层报告了什么。
         message: String,
     },
-    /// A tool refused or failed.
+    /// 工具拒绝或失败。
     Tool {
-        /// Name of the tool that failed.
+        /// 失败工具的名字。
         name: String,
-        /// What it reported.
+        /// 它报告了什么。
         message: String,
     },
-    /// The agent asked for a tool that is not registered.
+    /// 智能体请求了一个未注册的工具。
     UnknownTool {
-        /// The name the model produced.
+        /// 模型产出的名字。
         name: String,
-        /// Registered names, for the error message.
+        /// 已注册的名字，用于错误消息。
         available: Vec<String>,
     },
-    /// A limit stopped the loop: turns, tokens, or wall-clock.
+    /// 一个限额停止了循环：轮数、token 或墙钟。
     Budget {
-        /// Which limit, e.g. `max_turns`.
+        /// 哪个限额，例如 `max_turns`。
         limit: String,
-        /// The value that was exceeded.
+        /// 被超出的值。
         used: u64,
-        /// The configured ceiling.
+        /// 配置的上限。
         allowed: u64,
     },
-    /// Input or configuration was unusable.
+    /// 输入或配置不可用。
     Config {
-        /// What was wrong.
+        /// 哪里出了问题。
         message: String,
     },
-    /// A human declined to let the step run.
+    /// 人工拒绝让该步骤运行。
     Refused {
-        /// The tool or step that was rejected.
+        /// 被拒绝的工具或步骤。
         subject: String,
-        /// Why, as given by the reviewer.
+        /// 原因，由审查者给出。
         reason: String,
     },
-    /// The model's answer could not be read as the required structure.
+    /// 模型的回答无法按所需结构读取。
     Output {
-        /// Parse failure detail.
+        /// 解析失败详情。
         message: String,
-        /// The text that was parsed, truncated.
+        /// 被解析的文本，已截断。
         raw: String,
     },
-    /// Cooperative shutdown arrived mid-turn.
+    /// 协作式关停在一轮中途到达。
     Stopped,
 }
 
 impl AgentError {
-    /// A configuration or argument problem.
+    /// 一个配置或参数问题。
     pub fn config(message: impl Display) -> Self {
         Self::Config {
             message: message.to_string(),
         }
     }
 
-    /// A limit was reached.
+    /// 达到了一个限额。
     pub fn budget(limit: impl Into<String>, used: u64, allowed: u64) -> Self {
         Self::Budget {
             limit: limit.into(),
@@ -88,7 +88,7 @@ impl AgentError {
         }
     }
 
-    /// A tool failed.
+    /// 一个工具失败了。
     pub fn tool(name: impl Into<String>, message: impl Display) -> Self {
         Self::Tool {
             name: name.into(),
@@ -96,7 +96,7 @@ impl AgentError {
         }
     }
 
-    /// The answer did not match the required shape.
+    /// 回答不符合所需的形状。
     pub fn output(message: impl Display, raw: impl Into<String>) -> Self {
         let raw = raw.into();
         let cut = raw.chars().take(200).collect::<String>();
@@ -106,10 +106,10 @@ impl AgentError {
         }
     }
 
-    /// True when repeating the turn could plausibly work.
+    /// 当重复这一轮有可能奏效时为真。
     ///
-    /// Only provider failures and tool failures carry that signal; budgets,
-    /// refusals and malformed output are the caller's decision to make.
+    /// 只有提供方失败与工具失败携带该信号；预算、
+    /// 拒绝与畸形输出由调用者决定。
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Provider { retryable, .. } => *retryable,
@@ -123,7 +123,7 @@ impl AgentError {
         }
     }
 
-    /// A short label for metrics and logs.
+    /// 用于指标与日志的简短标签。
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Provider { .. } => "provider",
@@ -138,7 +138,7 @@ impl AgentError {
         }
     }
 
-    /// Wrap a provider failure, keeping its retryability.
+    /// 包装一个提供方失败，保留其可重试性。
     pub fn provider(error: &LlmError) -> Self {
         Self::Provider {
             message: error.to_string(),
@@ -146,7 +146,7 @@ impl AgentError {
         }
     }
 
-    /// Wrap a memory failure.
+    /// 包装一个记忆失败。
     pub fn memory(error: &MemoryError) -> Self {
         Self::Memory {
             message: error.to_string(),

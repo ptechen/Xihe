@@ -1,15 +1,14 @@
-//! Which parts of a world a system is allowed to touch.
+//! 系统被允许触碰世界的哪些部分。
 
 use std::any::TypeId;
 use std::collections::HashSet;
 
-/// Declared world access of a [`System`](crate::System).
+/// [`System`](crate::System) 声明的世界访问权限。
 ///
-/// The scheduler never parses system code; it trusts this declaration to decide
-/// which systems may share a parallel stage. Declaring too much is safe (the
-/// system simply runs alone), declaring too little is a user error: a system that
-/// writes through the world handle must say so, otherwise two systems can write
-/// the same component at the same time.
+/// 调度器从不解析系统代码；它信任此声明来决定哪些系统可共享
+/// 一个并行阶段。声明过多是安全的（系统只是单独运行），
+/// 声明过少则是用户错误：通过世界句柄写入的系统必须说明这一点，
+/// 否则两个系统可能同时写入同一个组件。
 ///
 /// ```
 /// use xihe_schedule::Access;
@@ -33,7 +32,7 @@ pub struct Access {
 }
 
 impl Access {
-    /// Touches nothing, so it never conflicts.
+    /// 不触碰任何东西，因此永不冲突。
     pub fn empty() -> Self {
         Self {
             reads: HashSet::new(),
@@ -43,17 +42,17 @@ impl Access {
         }
     }
 
-    /// Reads exactly one component or resource type.
+    /// 恰好读取一个组件或资源类型。
     pub fn read<T: 'static>() -> Self {
         Self::empty().and_read::<T>()
     }
 
-    /// Writes exactly one component or resource type.
+    /// 恰好写入一个组件或资源类型。
     pub fn write<T: 'static>() -> Self {
         Self::empty().and_write::<T>()
     }
 
-    /// Reads an unknown part of the world: compatible with other readers only.
+    /// 读取世界的未知部分：仅与其他读者兼容。
     pub fn read_only() -> Self {
         Self {
             all_read: true,
@@ -61,8 +60,8 @@ impl Access {
         }
     }
 
-    /// May write anything. This is the default for systems that do not declare
-    /// access, so forgetting to declare costs parallelism but never correctness.
+    /// 可写入任何东西。这是未声明访问权限的系统的默认值，
+    /// 因此忘记声明会损失并行度，但绝不会损失正确性。
     pub fn exclusive() -> Self {
         Self {
             all_write: true,
@@ -70,19 +69,19 @@ impl Access {
         }
     }
 
-    /// Adds a read of `T`.
+    /// 添加对 `T` 的读取。
     pub fn and_read<T: 'static>(mut self) -> Self {
         self.reads.insert(TypeId::of::<T>());
         self
     }
 
-    /// Adds a write of `T`.
+    /// 添加对 `T` 的写入。
     pub fn and_write<T: 'static>(mut self) -> Self {
         self.writes.insert(TypeId::of::<T>());
         self
     }
 
-    /// Adds `other` to this declaration.
+    /// 将 `other` 加入此声明。
     pub fn merged(mut self, other: &Self) -> Self {
         self.reads.extend(other.reads.iter());
         self.writes.extend(other.writes.iter());
@@ -91,31 +90,31 @@ impl Access {
         self
     }
 
-    /// `true` when nothing is accessed.
+    /// 没有访问任何东西时为 `true`。
     #[inline]
     pub fn is_empty(&self) -> bool {
         !self.all_read && !self.all_write && self.reads.is_empty() && self.writes.is_empty()
     }
 
-    /// `true` when the system may write anything.
+    /// 系统可写入任何东西时为 `true`。
     #[inline]
     pub fn is_exclusive(&self) -> bool {
         self.all_write
     }
 
-    /// Declared read set.
+    /// 声明的读集合。
     #[inline]
     pub fn reads(&self) -> &HashSet<TypeId> {
         &self.reads
     }
 
-    /// Declared write set.
+    /// 声明的写集合。
     #[inline]
     pub fn writes(&self) -> &HashSet<TypeId> {
         &self.writes
     }
 
-    /// `true` when the two declarations cannot run at the same time.
+    /// 两个声明不能同时运行时为 `true`。
     pub fn conflicts(&self, other: &Self) -> bool {
         if self.is_empty() || other.is_empty() {
             return false;
@@ -124,7 +123,7 @@ impl Access {
             return true;
         }
         if self.all_read || other.all_read {
-            // An unspecified reader conflicts with any writer.
+            // 未指明的读者与任何写者冲突。
             return !self.writes.is_empty() || !other.writes.is_empty();
         }
         !self.writes.is_disjoint(&other.writes)
@@ -132,7 +131,7 @@ impl Access {
             || !self.reads.is_disjoint(&other.writes)
     }
 
-    /// `true` when the two declarations may share a parallel stage.
+    /// 两个声明可共享一个并行阶段时为 `true`。
     #[inline]
     pub fn compatible(&self, other: &Self) -> bool {
         !self.conflicts(other)

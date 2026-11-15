@@ -1,52 +1,51 @@
-//! Generation-checked entity identifiers and the alive-entity index.
+//! 带世代校验的实体标识符与存活实体索引。
 
 use std::fmt;
 
-/// A stable, generation-checked handle to a world slot.
+/// 指向世界槽位的稳定、带世代校验的句柄。
 ///
-/// [`Entity`] is `u32`-sized, `Copy` and hashable, so it is cheap to keep inside
-/// components, message payloads and tool arguments. Recycled slots bump
-/// [`Entity::generation`], which makes stale handles fail lookups instead of
-/// aliasing a new entity.
+/// [`Entity`] 大小为 `u32`、可 `Copy` 且可哈希，因此可以廉价地存放在
+/// 组件、消息载荷和工具参数中。回收槽位会递增
+/// [`Entity::generation`]，使过期句柄查找失败，而不是别名到新实体。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Entity {
     index: u32,
     generation: u32,
 }
 
-/// Sentinel that never resolves to a live entity.
+/// 永远不会解析到存活实体的哨兵值。
 pub const DANGLING: Entity = Entity {
     index: u32::MAX,
     generation: u32::MAX,
 };
 
 impl Entity {
-    /// Builds an entity from raw parts. Only used by the allocator and by
-    /// (de)serialization of persisted worlds.
+    /// 从原始部分构建实体。仅供分配器以及持久化世界的
+    /// （反）序列化使用。
     #[inline]
     pub const fn from_raw(index: u32, generation: u32) -> Self {
         Self { index, generation }
     }
 
-    /// Slot index inside [`Entities`].
+    /// 在 [`Entities`] 中的槽位索引。
     #[inline]
     pub const fn index(self) -> u32 {
         self.index
     }
 
-    /// Number of times the slot has been recycled plus one.
+    /// 槽位被回收的次数加一。
     #[inline]
     pub const fn generation(self) -> u32 {
         self.generation
     }
 
-    /// `true` for [`DANGLING`].
+    /// 对 [`DANGLING`] 为 `true`。
     #[inline]
     pub const fn is_dangling(self) -> bool {
         self.index == u32::MAX
     }
 
-    /// Returns `self` when `alive`, `None` otherwise. Useful in `Option` chains.
+    /// `alive` 时返回 `self`，否则返回 `None`。便于用于 `Option` 链。
     #[inline]
     pub fn take_if(self, alive: bool) -> Option<Self> {
         if alive { Some(self) } else { None }
@@ -71,7 +70,7 @@ struct Slot {
     alive: bool,
 }
 
-/// Slot table backing a [`World`](crate::World).
+/// 支撑 [`World`](crate::World) 的槽位表。
 #[derive(Debug, Default)]
 pub struct Entities {
     slots: Vec<Slot>,
@@ -80,15 +79,15 @@ pub struct Entities {
 }
 
 impl Entities {
-    /// Creates an empty table.
+    /// 创建一个空表。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Allocates an entity, reusing the most recently freed slot.
+    /// 分配一个实体，复用最近释放的槽位。
     ///
     /// # Panics
-    /// If more than `u32::MAX - 1` slots would be required.
+    /// 若需要超过 `u32::MAX - 1` 个槽位。
     pub fn alloc(&mut self) -> Entity {
         if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
@@ -111,12 +110,12 @@ impl Entities {
         }
     }
 
-    /// Allocates `count` entities in slot order.
+    /// 按槽位顺序分配 `count` 个实体。
     pub fn alloc_many(&mut self, count: usize) -> Vec<Entity> {
         (0..count).map(|_| self.alloc()).collect()
     }
 
-    /// Frees `entity`, returning `false` when it was already dead or stale.
+    /// 释放 `entity`，若它已死亡或过期则返回 `false`。
     pub fn dealloc(&mut self, entity: Entity) -> bool {
         if !self.is_alive(entity) {
             return false;
@@ -127,7 +126,7 @@ impl Entities {
         true
     }
 
-    /// `true` when the handle still points at a live slot.
+    /// 句柄仍指向存活槽位时为 `true`。
     #[inline]
     pub fn is_alive(&self, entity: Entity) -> bool {
         self.slots
@@ -135,13 +134,13 @@ impl Entities {
             .is_some_and(|slot| slot.alive && slot.generation == entity.generation())
     }
 
-    /// Current generation of a slot index, alive or not.
+    /// 某槽位索引的当前世代，无论是否存活。
     #[inline]
     pub fn generation(&self, index: u32) -> Option<u32> {
         self.slots.get(index as usize).map(|slot| slot.generation)
     }
 
-    /// Maps an index plus observed generation back to a live entity, if any.
+    /// 将索引加观察到的世代映射回存活实体（若有）。
     pub fn resolve(&self, index: u32, generation: u32) -> Option<Entity> {
         let slot = self.slots.get(index as usize)?;
         if slot.alive && slot.generation == generation {
@@ -151,25 +150,25 @@ impl Entities {
         }
     }
 
-    /// Number of live entities.
+    /// 存活实体的数量。
     #[inline]
     pub fn len(&self) -> usize {
         self.alive_count
     }
 
-    /// `true` when no entity is alive.
+    /// 没有存活实体时为 `true`。
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.alive_count == 0
     }
 
-    /// Highest allocated slot index (including dead slots).
+    /// 已分配的最高槽位索引（含死亡槽位）。
     #[inline]
     pub fn capacity(&self) -> usize {
         self.slots.len()
     }
 
-    /// Iterates every live entity in slot order.
+    /// 按槽位顺序遍历每个存活实体。
     pub fn iter(&self) -> AliveIter<'_> {
         AliveIter {
             slots: &self.slots,
@@ -178,7 +177,7 @@ impl Entities {
     }
 }
 
-/// Iterator over live entities produced by [`Entities::iter`].
+/// 由 [`Entities::iter`] 产生的存活实体迭代器。
 #[derive(Debug, Clone)]
 pub struct AliveIter<'e> {
     slots: &'e [Slot],

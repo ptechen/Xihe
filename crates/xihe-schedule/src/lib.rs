@@ -1,24 +1,23 @@
 //! # xihe-schedule
 //!
-//! Async execution for the Xihe ECS: the [`System`] trait, declared [`Access`],
-//! [`Schedule`]s with concurrent stages, deferred [`Command`]s and a typed
-//! [`MessageBus`].
+//! Xihe ECS 的异步执行：[`System`] trait、声明的 [`Access`]、
+//! 带并发阶段的 [`Schedule`]、延迟的 [`Command`] 以及类型化的
+//! [`MessageBus`]。
 //!
-//! ## How concurrency works
+//! ## 并发如何工作
 //!
-//! A [`World`](xihe_core::World) lives behind one `tokio::sync::RwLock`. Each
-//! system asks for a guard itself, and the scheduler uses the declared
-//! [`Access`] to decide who may run in the same [`Stage::Parallel`] group:
+//! 一个 [`World`](xihe_core::World) 置于一把 `tokio::sync::RwLock` 之后。每个
+//! 系统自行请求守卫，调度器用声明的 [`Access`] 来决定谁可以在同一个
+//! [`Stage::Parallel`] 组中运行：
 //!
-//! * read-only systems are polled together, so an agent awaiting an LLM response
-//!   does not block its neighbours;
-//! * a system that writes components or resources runs alone;
-//! * `&mut World` never crosses an `.await`, so no lock guard is held across
-//!   suspension unless the system opts into `world.read().await` deliberately.
+//! * 只读系统被一起轮询，因此等待 LLM 响应的智能体不会阻塞它的邻居；
+//! * 写入组件或资源的系统单独运行；
+//! * `&mut World` 绝不跨越 `.await`，因此除非系统刻意选择
+//!   `world.read().await`，否则不会跨挂起持有任何锁守卫。
 //!
-//! Two rules keep this deadlock-free: a system must not upgrade a read guard it
-//! already holds (it would wait for itself), and anything that needs to write
-//! while reading should [`SystemContext::enqueue`] a [`Command`] instead.
+//! 两条规则保证无死锁：系统不得升级它已持有的读守卫
+//! （那会等待它自己），任何需要在读取时写入的操作都应改为
+//! [`SystemContext::enqueue`] 一个 [`Command`]。
 //!
 //! ```
 //! use xihe_schedule::{access, system, SystemContext, Schedule, SystemSpec};
@@ -75,7 +74,7 @@ pub use schedule::{Schedule, Stage, SystemSpec, one_shot};
 pub use system::{FnSystem, Period, SysResult, System, SystemFuture, boxed, run_guarded, system};
 pub use work::Work;
 
-/// Declares world access for a system.
+/// 为一个系统声明世界访问权限。
 ///
 /// ```
 /// use xihe_schedule::access;
@@ -115,7 +114,7 @@ macro_rules! access {
     }};
 }
 
-/// Builds a named async system, optionally with declared access and cadence.
+/// 构建一个命名的异步系统，可选地带有声明的访问权限与节奏。
 ///
 /// ```
 /// use xihe_schedule::{system, SysResult, SystemContext};
@@ -159,7 +158,7 @@ macro_rules! system {
     };
 }
 
-/// Everything a user normally imports at once.
+/// 用户通常一次性导入的全部内容。
 pub mod prelude {
     pub use super::{
         Access, BusHandle, Command, CommandQueue, Inbox, MessageBus, Period, Schedule, Stage,

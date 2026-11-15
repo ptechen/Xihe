@@ -1,9 +1,8 @@
-//! An OpenAI-compatible chat-completions provider, behind the `openai` feature.
+//! 一个 OpenAI 兼容的聊天补全提供方，置于 `openai` feature 之后。
 //!
-//! Only the HTTP transport lives here; request and response encoding is in
-//! [`crate::wire`], which is compiled and tested even without this feature.
-//! Enabling `openai` pulls in `reqwest`, so the workspace needs registry access
-//! the first time it is built with that feature.
+//! 这里只有 HTTP 传输；请求与响应编码位于 [`crate::wire`]，
+//! 即使没有此 feature 它也会被编译与测试。启用 `openai` 会引入
+//! `reqwest`，因此工作区首次以该 feature 构建时需要注册表访问。
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,26 +22,26 @@ use crate::wire::{
 };
 use crate::GenerationResponse;
 
-/// Where and how to reach the server.
+/// 在何处、以何种方式连接服务器。
 #[derive(Clone, Debug)]
 pub struct OpenAiConfig {
-    /// Server root, without the `/chat/completions` suffix.
+    /// 服务器根地址，不含 `/chat/completions` 后缀。
     pub base_url: String,
-    /// Bearer token; `None` sends the request unauthenticated.
+    /// Bearer 令牌；`None` 则以未鉴权方式发送请求。
     pub api_key: Option<String>,
-    /// Model name sent in the request body.
+    /// 在请求体中发送的模型名。
     pub model: String,
-    /// The connect timeout, the total deadline for a non-streaming call, and the
-    /// idle gap allowed between stream frames. A stalled connection surfaces as
-    /// [`LlmError::Timeout`]; a healthy long stream is not cut off by it.
+    /// 连接超时、非流式调用的总截止时间，以及流帧之间允许的空闲间隔。
+    /// 停滞的连接会浮现为 [`LlmError::Timeout`]；
+    /// 健康的长流不会被它截断。
     pub timeout: Duration,
-    /// Extra headers, e.g. an `api-version` for gateway deployments.
+    /// 额外头部，例如网关部署用的 `api-version`。
     pub headers: Vec<(String, String)>,
 }
 
 impl OpenAiConfig {
-    /// Read `OPENAI_BASE_URL` (or `XIHE_OPENAI_BASE_URL`), `OPENAI_API_KEY` and
-    /// `XIHE_MODEL` (or `OPENAI_MODEL`).
+    /// 读取 `OPENAI_BASE_URL`（或 `XIHE_OPENAI_BASE_URL`）、`OPENAI_API_KEY`
+    /// 与 `XIHE_MODEL`（或 `OPENAI_MODEL`）。
     pub fn from_env() -> Result<Self, LlmError> {
         let read = |keys: &[&str]| -> Option<String> {
             keys.iter()
@@ -57,8 +56,8 @@ impl OpenAiConfig {
         )
     }
 
-    /// The env-reading rules, split out so tests can feed explicit values —
-    /// edition 2024 makes `set_var` unsafe, so process env is never touched.
+    /// 环境变量读取规则，单独拆出以便测试能喂入显式值——
+    /// edition 2024 使 `set_var` 成为 unsafe，因此绝不触碰进程环境变量。
     pub fn build(
         base_url: Option<&str>,
         api_key: Option<&str>,
@@ -79,25 +78,25 @@ impl OpenAiConfig {
         })
     }
 
-    /// Replace the request and stream-idle timeout.
+    /// 替换请求与流空闲超时。
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Replace the model sent when a request does not name one.
+    /// 替换请求未指明模型时所发送的模型。
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
     }
 
-    /// Send an extra header on every request.
+    /// 在每个请求上发送一个额外头部。
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
     }
 
-    /// The chat-completions endpoint for this base URL.
+    /// 此 base URL 对应的聊天补全端点。
     pub fn completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url)
     }
@@ -107,7 +106,7 @@ fn trim_slashes(value: &str) -> String {
     value.trim_end_matches('/').to_string()
 }
 
-/// A chat-completions server reached over HTTP.
+/// 通过 HTTP 连接的聊天补全服务器。
 #[derive(Clone)]
 pub struct OpenAiProvider {
     config: Arc<OpenAiConfig>,
@@ -115,11 +114,11 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    /// Build a provider, sharing one HTTP client across calls.
+    /// 构建提供方，在各次调用间共享一个 HTTP 客户端。
     pub fn new(config: OpenAiConfig) -> Self {
-        // No total deadline on the shared client: it would also bound the SSE
-        // body read and cut off a healthy long stream. `generate` sets its own
-        // total deadline per request; `stream` relies on the idle gap instead.
+        // 共享客户端上不设总截止时间：那也会限制 SSE 体读取，
+        // 截断健康的长流。`generate` 为每个请求设置自己的总截止时间；
+        // `stream` 则改为依赖空闲间隔。
         let http = reqwest::Client::builder()
             .connect_timeout(config.timeout)
             .build()
@@ -130,17 +129,17 @@ impl OpenAiProvider {
         }
     }
 
-    /// Build a provider from the environment.
+    /// 从环境构建提供方。
     pub fn from_env() -> Result<Self, LlmError> {
         Ok(Self::new(OpenAiConfig::from_env()?))
     }
 
-    /// The configuration this provider sends.
+    /// 此提供方发送的配置。
     pub fn config(&self) -> &OpenAiConfig {
         &self.config
     }
 
-    /// Replace the model on this provider, leaving clones unaffected.
+    /// 替换此提供方上的模型，克隆不受影响。
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         let mut config = self.config.as_ref().clone();
         config.model = model.into();
@@ -216,8 +215,8 @@ impl Provider for OpenAiProvider {
         let mut body = to_wire(request, &self.config.model);
         body["stream"] = json!(true);
         body["stream_options"] = json!({ "include_usage": true });
-        // Bound connection + headers, but not the body: a long healthy stream
-        // must outlive this deadline, so only the idle gap below governs it.
+        // 限制连接 + 头部，但不限制体：健康的长流必须比此截止时间
+        // 活得更久，因此只有下面的空闲间隔来管控它。
         let response = tokio::time::timeout(self.config.timeout, self.request(body).send())
             .await
             .map_err(|_| LlmError::Timeout {
@@ -230,9 +229,8 @@ impl Provider for OpenAiProvider {
             let text = response.text().await.unwrap_or_default();
             return Err(error_from_status(status, text, retry_after));
         }
-        // The SSE reader runs on its own task: when the consumer drops the stream
-        // the send fails and the task stops reading, which is also how cancellation
-        // propagates to the connection.
+        // SSE 读取器在自己的任务上运行：当消费者丢弃流时，
+        // 发送失败、任务停止读取，这也是取消如何传播到连接的方式。
         let (sender, receiver) = mpsc::channel::<Result<StreamChunk, LlmError>>(32);
         let idle_timeout = self.config.timeout;
         let mut bytes = response.bytes_stream();
@@ -281,7 +279,7 @@ impl Provider for OpenAiProvider {
     }
 }
 
-/// Turn the mpsc half into a `StreamBox`; kept separate so the coercion is clear.
+/// 将 mpsc 接收端转为 `StreamBox`；单独拆出以使类型强制转换清晰。
 fn stream_channel_to_pin_box(
     receiver: mpsc::Receiver<Result<StreamChunk, LlmError>>,
 ) -> StreamBox {
@@ -290,7 +288,7 @@ fn stream_channel_to_pin_box(
     }))
 }
 
-/// Classify a transport-level failure, keeping timeouts distinguishable.
+/// 对传输层失败分类，保持超时可区分。
 fn map_send_error(error: reqwest::Error, started: Instant) -> LlmError {
     if error.is_timeout() {
         return LlmError::Timeout {
@@ -303,8 +301,7 @@ fn map_send_error(error: reqwest::Error, started: Instant) -> LlmError {
     LlmError::transport(error.to_string())
 }
 
-/// Read the `Retry-After` hint while the response headers are still available,
-/// before the body is consumed.
+/// 在响应头部仍可用、体尚未被消费时读取 `Retry-After` 提示。
 fn retry_after_header(response: &reqwest::Response) -> Option<Duration> {
     response
         .headers()
@@ -313,7 +310,7 @@ fn retry_after_header(response: &reqwest::Response) -> Option<Duration> {
         .and_then(parse_retry_after)
 }
 
-/// Ask one question and return the answer text.
+/// 问一个问题并返回答案文本。
 pub async fn ask(
     provider: &OpenAiProvider,
     system: &str,
@@ -386,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn streaming_an_unreachable_server_fails_before_the_stream_starts() {
         let provider = OpenAiProvider::new(config());
-        // `StreamBox` is not `Debug`, so the result is matched rather than unwrapped.
+        // `StreamBox` 不是 `Debug`，因此对结果做匹配而非 unwrap。
         let error = match provider
             .stream(&GenerationRequest::new("m").with_user("hi"))
             .await
@@ -399,7 +396,7 @@ mod tests {
 
     #[tokio::test]
     async fn ask_uses_the_provider_default_model() {
-        // No server: the failure must still name the transport, not a panic.
+        // 没有服务器：失败仍必须指明传输层，而非 panic。
         let provider = OpenAiProvider::new(config());
         assert!(ask(&provider, "be brief", "hi").await.is_err());
     }
@@ -411,8 +408,8 @@ mod tests {
         b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
     const SSE_FRAME: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"tok\"}}]}\n\n";
 
-    /// Bind a one-shot HTTP server: drain the request headers, then hand the
-    /// socket to `respond`. Returns the base URL to point a provider at.
+    /// 绑定一个一次性 HTTP 服务器：读尽请求头部，然后把套接字
+    /// 交给 `respond`。返回可供提供方指向的 base URL。
     async fn spawn_server<F, Fut>(respond: F) -> String
     where
         F: FnOnce(TcpStream) -> Fut + Send + 'static,
@@ -478,7 +475,7 @@ mod tests {
             socket.write_all(SSE_HEAD).await.unwrap();
             socket.write_all(SSE_FRAME).await.unwrap();
             socket.flush().await.unwrap();
-            // Hold the connection open without sending: only the idle gap trips.
+            // 保持连接打开但不发送：只有空闲间隔会触发。
             tokio::time::sleep(Duration::from_millis(600)).await;
         })
         .await;

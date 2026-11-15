@@ -1,4 +1,4 @@
-//! The world: entity index, component storages and resources.
+//! 世界：实体索引、组件存储与资源。
 
 use crate::component::{Component, Resource};
 use crate::entity::{Entities, Entity};
@@ -6,15 +6,15 @@ use crate::query::{Fetch, Query};
 use crate::resources::Resources;
 use crate::storage::Storages;
 
-/// Hard ceiling on allocated entity slots (`u32` index space minus the sentinel).
+/// 已分配实体槽位的硬上限（`u32` 索引空间减去哨兵值）。
 pub const MAX_ENTITIES: usize = u32::MAX as usize - 1;
 
-/// Components inserted together, typically at spawn time.
+/// 一起插入的组件，通常在 spawn 时。
 ///
-/// Implemented for tuples of up to six components, so
-/// `world.spawn_with((profile, conversation))` needs no extra trait imports.
+/// 已为至多六个组件的元组实现，因此
+/// `world.spawn_with((profile, conversation))` 无需额外的 trait 导入。
 pub trait Bundle: Send {
-    /// Inserts every member into `entity`.
+    /// 将每个成员插入 `entity`。
     fn insert_into(self, world: &mut World, entity: Entity);
 }
 
@@ -37,44 +37,44 @@ impl_bundle!(A, B, C, D);
 impl_bundle!(A, B, C, D, E);
 impl_bundle!(A, B, C, D, E, F);
 
-/// Read-only view handed to [`World::edit_with`] closures, so one component type
-/// can be mutated while every other component and resource stays readable.
+/// 交给 [`World::edit_with`] 闭包的只读视图，使得一个组件类型可被修改，
+/// 而其他所有组件与资源仍保持可读。
 pub struct ReadContext<'w> {
     storages: &'w Storages,
     resources: &'w Resources,
 }
 
 impl<'w> ReadContext<'w> {
-    /// Shared component of `entity`.
+    /// `entity` 的共享组件。
     #[inline]
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&'w T> {
         self.storages.get::<T>(entity)
     }
 
-    /// `true` when `entity` holds `T`.
+    /// `entity` 持有 `T` 时为 `true`。
     #[inline]
     pub fn contains<T: Component>(&self, entity: Entity) -> bool {
         self.storages.contains::<T>(entity)
     }
 
-    /// Shared resource.
+    /// 共享资源。
     #[inline]
     pub fn resource<R: Resource>(&self) -> Option<&'w R> {
         self.resources.get::<R>()
     }
 
-    /// Number of entities holding `T`.
+    /// 持有 `T` 的实体数量。
     #[inline]
     pub fn count<T: Component>(&self) -> usize {
         self.storages.count_of::<T>()
     }
 }
 
-/// Owns every entity, component and resource of a simulation.
+/// 拥有一次模拟的每个实体、组件与资源。
 ///
-/// A `World` is plain data: no locks, no `unsafe`, no async. Concurrency is a
-/// property of the driver (`xihe-schedule` and `xihe-runtime`), which shares it
-/// through an `RwLock` and only ever hands systems shared or exclusive access.
+/// `World` 是纯数据：无锁、无 `unsafe`、无异步。并发是驱动器
+/// （`xihe-schedule` 与 `xihe-runtime`）的属性，它通过 `RwLock` 共享世界，
+/// 且只向系统交出共享或独占访问。
 #[derive(Debug, Default)]
 pub struct World {
     entities: Entities,
@@ -83,31 +83,31 @@ pub struct World {
 }
 
 impl World {
-    /// Creates an empty world.
+    /// 创建一个空世界。
     pub fn new() -> Self {
         Self::default()
     }
 
-    // --- entities -----------------------------------------------------------
+    // --- 实体 -----------------------------------------------------------
 
-    /// Allocates a bare entity.
+    /// 分配一个裸实体。
     pub fn spawn(&mut self) -> Entity {
         self.entities.alloc()
     }
 
-    /// Allocates an entity and fills it with a [`Bundle`].
+    /// 分配一个实体并用 [`Bundle`] 填充它。
     pub fn spawn_with<B: Bundle>(&mut self, bundle: B) -> Entity {
         let entity = self.spawn();
         bundle.insert_into(self, entity);
         entity
     }
 
-    /// Allocates `count` entities.
+    /// 分配 `count` 个实体。
     pub fn spawn_many(&mut self, count: usize) -> Vec<Entity> {
         self.entities.alloc_many(count)
     }
 
-    /// Frees an entity and drops its components. `true` when it was alive.
+    /// 释放一个实体并丢弃其组件。它原本存活时为 `true`。
     pub fn despawn(&mut self, entity: Entity) -> bool {
         if !self.entities.is_alive(entity) {
             return false;
@@ -116,7 +116,7 @@ impl World {
         self.entities.dealloc(entity)
     }
 
-    /// Frees every live entity, keeping resources. Returns how many were dropped.
+    /// 释放每个存活实体，保留资源。返回被丢弃的数量。
     pub fn despawn_all(&mut self) -> usize {
         let dead: Vec<Entity> = self.entities.iter().collect();
         let count = dead.len();
@@ -126,89 +126,89 @@ impl World {
         count
     }
 
-    /// `true` when the handle still points at a live entity.
+    /// 句柄仍指向存活实体时为 `true`。
     #[inline]
     pub fn is_alive(&self, entity: Entity) -> bool {
         self.entities.is_alive(entity)
     }
 
-    /// Live entity count.
+    /// 存活实体数量。
     #[inline]
     pub fn len(&self) -> usize {
         self.entities.len()
     }
 
-    /// `true` when no entity is alive.
+    /// 没有存活实体时为 `true`。
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.entities.is_empty()
     }
 
-    /// Iterates live entities in slot order.
+    /// 按槽位顺序遍历存活实体。
     pub fn entities(&self) -> impl Iterator<Item = Entity> + Clone + '_ {
         self.entities.iter()
     }
 
-    /// Borrowed entity index.
+    /// 借用的实体索引。
     #[inline]
     pub fn entity_index(&self) -> &Entities {
         &self.entities
     }
 
-    // --- components ---------------------------------------------------------
+    // --- 组件 ---------------------------------------------------------
 
-    /// Inserts `component`, returning the value it replaced.
+    /// 插入 `component`，返回它替换掉的值。
     pub fn insert<T: Component>(&mut self, entity: Entity, component: T) -> Option<T> {
         self.storages.insert(entity, component)
     }
 
-    /// Inserts a whole [`Bundle`] into an existing entity.
+    /// 将整个 [`Bundle`] 插入一个已有实体。
     pub fn insert_bundle<B: Bundle>(&mut self, entity: Entity, bundle: B) {
         bundle.insert_into(self, entity);
     }
 
-    /// Shared component reference.
+    /// 共享组件引用。
     #[inline]
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
         self.storages.get::<T>(entity)
     }
 
-    /// Exclusive component reference.
+    /// 独占组件引用。
     #[inline]
     pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
         self.storages.get_mut::<T>(entity)
     }
 
-    /// `true` when `entity` is alive and holds `T`.
+    /// `entity` 存活且持有 `T` 时为 `true`。
     #[inline]
     pub fn contains<T: Component>(&self, entity: Entity) -> bool {
         self.entities.is_alive(entity) && self.storages.contains::<T>(entity)
     }
 
-    /// Removes and returns the component of `entity`.
+    /// 移除并返回 `entity` 的组件。
     #[inline]
     pub fn remove<T: Component>(&mut self, entity: Entity) -> Option<T> {
         self.storages.remove::<T>(entity)
     }
 
-    /// Number of entities holding `T`.
+    /// 持有 `T` 的实体数量。
     #[inline]
     pub fn count<T: Component>(&self) -> usize {
         self.storages.count_of::<T>()
     }
 
-    // --- queries ------------------------------------------------------------
+    // --- 查询 ------------------------------------------------------------
 
-    /// Runs a read-only query, e.g. `world.query::<(&Profile, &Conversation)>()`.
+    /// 运行只读查询，例如 `world.query::<(&Profile, &Conversation)>()`。
     pub fn query<'w, Q: Fetch<'w>>(&'w self) -> Query<'w, Q> {
         Query::new(&self.storages, &self.entities)
     }
 
-    /// The only entity holding `T`, or `None` when no entity does.
+    /// 唯一持有 `T` 的实体，没有实体持有时为 `None`。
     ///
-    /// Panics when two entities hold it: singleton components name a process-wide
-    /// resource by entity handle (a pipeline, a mailbox), and two of them is a
-    /// programming error rather than a runtime choice.
+    /// 当两个实体持有它时 panic：单例组件以实体句柄命名一个进程级
+    /// 资源（一条流水线、一个信箱），出现两个属于编程错误，
+    /// 而非运行时的选择。
     pub fn single<T: Component>(&self) -> Option<Entity> {
         let found: Vec<Entity> = self.storages.cursor_of::<T>().take(2).collect();
         match found.as_slice() {
@@ -222,11 +222,11 @@ impl World {
         }
     }
 
-    /// Mutable access to every `T`, one component type at a time.
+    /// 对每个 `T` 的可变访问，一次一个组件类型。
     ///
-    /// This is the safe counterpart of a `&mut T` query term: the storage of `T`
-    /// leaves the map for the duration of `f`, so the closure gets `&mut T` while
-    /// the rest of the world stays readable — see [`World::edit_with`].
+    /// 这是 `&mut T` 查询项的安全对应物：`T` 的存储在 `f` 执行期间
+    /// 离开映射，因此闭包拿到 `&mut T`，而世界其余部分保持可读——
+    /// 参见 [`World::edit_with`]。
     pub fn edit<T: Component, F>(&mut self, mut f: F)
     where
         F: FnMut(Entity, &mut T),
@@ -240,7 +240,7 @@ impl World {
         });
     }
 
-    /// [`World::edit`] plus a [`ReadContext`] over the other components.
+    /// [`World::edit`] 外加一个覆盖其他组件的 [`ReadContext`]。
     pub fn edit_with<T: Component, F>(&mut self, mut f: F)
     where
         F: FnMut(Entity, &mut T, &ReadContext<'_>),
@@ -261,55 +261,55 @@ impl World {
         });
     }
 
-    // --- resources ----------------------------------------------------------
+    // --- 资源 ----------------------------------------------------------
 
-    /// Inserts a resource, returning the previous value.
+    /// 插入一个资源，返回先前的值。
     pub fn insert_resource<R: Resource>(&mut self, value: R) -> Option<R> {
         self.resources.insert(value)
     }
 
-    /// Ensures `R::default()` exists and returns it.
+    /// 确保 `R::default()` 存在并返回它。
     pub fn init_resource<R: Resource + Default>(&mut self) -> &mut R {
         self.resources.init::<R>()
     }
 
-    /// Shared resource reference.
+    /// 共享资源引用。
     #[inline]
     pub fn resource<R: Resource>(&self) -> Option<&R> {
         self.resources.get::<R>()
     }
 
-    /// Exclusive resource reference.
+    /// 独占资源引用。
     #[inline]
     pub fn resource_mut<R: Resource>(&mut self) -> Option<&mut R> {
         self.resources.get_mut::<R>()
     }
 
-    /// Removes a resource.
+    /// 移除一个资源。
     #[inline]
     pub fn take_resource<R: Resource>(&mut self) -> Option<R> {
         self.resources.remove::<R>()
     }
 
-    /// `true` when the resource exists.
+    /// 资源存在时为 `true`。
     #[inline]
     pub fn has_resource<R: Resource>(&self) -> bool {
         self.resources.contains::<R>()
     }
 
-    // --- introspection ------------------------------------------------------
+    // --- 自省 ------------------------------------------------------
 
-    /// `(component type name, entity count)` pairs, sorted by name.
+    /// `(组件类型名, 实体数量)` 对，按名称排序。
     pub fn component_counts(&self) -> Vec<(&'static str, usize)> {
         self.storages.counts()
     }
 
-    /// Resource type names, sorted.
+    /// 资源类型名，已排序。
     pub fn resource_names(&self) -> Vec<&'static str> {
         self.resources.names()
     }
 
-    /// Aggregate counters used by the observer layer.
+    /// 观察器层使用的聚合计数器。
     #[inline]
     pub fn stats(&self) -> WorldStats {
         WorldStats {
@@ -320,7 +320,7 @@ impl World {
         }
     }
 
-    /// Drops every entity, component and resource.
+    /// 丢弃每个实体、组件与资源。
     pub fn clear(&mut self) {
         self.entities = Entities::default();
         self.storages.clear();
@@ -328,16 +328,16 @@ impl World {
     }
 }
 
-/// Counters describing the size of a world.
+/// 描述世界规模的计数器。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct WorldStats {
-    /// Live entities.
+    /// 存活实体。
     pub entities: usize,
-    /// Distinct component types in use.
+    /// 使用中的不同组件类型。
     pub component_types: usize,
-    /// Total component instances.
+    /// 组件实例总数。
     pub components: usize,
-    /// Resources in the type map.
+    /// 类型映射中的资源。
     pub resources: usize,
 }
 

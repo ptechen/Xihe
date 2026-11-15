@@ -1,10 +1,9 @@
-//! Agent entities for Xihe: conversation state, tools, the ReAct loop,
-//! structured output, guardrails and human-in-the-loop approvals.
+//! Xihe 的智能体实体：对话状态、工具、ReAct 循环、
+//! 结构化输出、护栏与人工介入审批。
 //!
-//! Nothing in this crate decides *policy* about scheduling or storage; it
-//! composes the layers underneath — [`xihe_llm`] for model access,
-//! [`xihe_memory`] for recall, [`xihe_core`] and [`xihe_schedule`] for the ECS
-//! world and its loop.
+//! 本 crate 不决定关于调度或存储的任何*策略*；它组合下层——
+//! [`xihe_llm`] 用于模型访问，[`xihe_memory`] 用于召回，
+//! [`xihe_core`] 与 [`xihe_schedule`] 用于 ECS 世界及其循环。
 
 pub mod error;
 pub mod guardrail;

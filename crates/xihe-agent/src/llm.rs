@@ -1,10 +1,9 @@
-//! The provider client as a world resource.
+//! 作为世界资源的提供方客户端。
 //!
-//! One [`LlmService`] per process is usually right: it owns the connection pool
-//! and the retry policy, and every agent reads it from the world instead of
-//! carrying its own client. Because the ReAct system must call the provider
-//! *without* holding the world lock, the service hands out cheap `Arc` clones
-//! rather than borrowed clients.
+//! 每进程一个 [`LlmService`] 通常是对的：它拥有连接池
+//! 与重试策略，每个智能体从世界读取它，而非自带客户端。
+//! 因为 ReAct 系统必须在不持有世界锁的情况下调用提供方，
+//! 服务发放廉价的 `Arc` 克隆，而非借用的客户端。
 
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
@@ -13,58 +12,58 @@ use xihe_core::World;
 use xihe_llm::{ChatClient, DynProvider, Provider};
 use xihe_schedule::SystemContext;
 
-/// A shared chat client, stored as a resource so systems can find it by type.
+/// 共享的聊天客户端，存为资源，使系统能按类型找到它。
 #[derive(Clone)]
 pub struct LlmService(Arc<ChatClient>);
 
 impl LlmService {
-    /// Wrap an existing client, keeping the retry policy it was built with.
+    /// 包装一个已有客户端，保留它构建时所带的重试策略。
     pub fn new(client: ChatClient) -> Self {
         Self(Arc::new(client))
     }
 
-    /// Wrap a provider, adopting its default model.
+    /// 包装一个提供方，采用其默认模型。
     pub fn from_provider<P: Provider>(provider: P) -> Self {
         Self::new(ChatClient::from_provider(provider))
     }
 
-    /// Wrap a provider behind an `Arc`, naming the model to use by default.
+    /// 把提供方包装在 `Arc` 之后，命名默认使用的模型。
     pub fn from_dyn(provider: DynProvider, model: impl Into<String>) -> Self {
         Self::new(ChatClient::new(provider, model))
     }
 
-    /// The client behind the shared handle.
+    /// 共享句柄背后的客户端。
     pub fn client(&self) -> &ChatClient {
         &self.0
     }
 
-    /// A second handle to the same client.
+    /// 指向同一客户端的第二个句柄。
     pub fn shared(&self) -> Arc<ChatClient> {
         Arc::clone(&self.0)
     }
 
-    /// The model this service answers with when a request does not name one.
+    /// 当请求未指定模型时，本服务用以作答的模型。
     pub fn model(&self) -> String {
         self.0.model().to_string()
     }
 
-    /// The provider's own identifier, e.g. `mock`.
+    /// 提供方自己的标识符，例如 `mock`。
     pub fn provider_id(&self) -> String {
         self.0.provider_id().to_string()
     }
 
-    /// Put the service in the world, returning any previous one.
+    /// 把服务放入世界，返回先前的那个（若有）。
     pub fn install(&self, world: &mut World) -> Option<Self> {
         world.insert_resource(self.clone())
     }
 
-    /// Read the service out of a locked world.
+    /// 从已加锁的世界中读出服务。
     pub fn from_world(world: &World) -> Option<Self> {
         world.resource::<Self>().cloned()
     }
 
-    /// Read the service through a system context; the lock is gone when this
-    /// returns, which is what makes it safe to await a generation afterwards.
+    /// 通过系统上下文读取服务；返回时锁已释放，
+    /// 这正是之后能安全 await 一次生成的原因。
     pub async fn read(ctx: &SystemContext) -> Option<Self> {
         ctx.read_resource(|world| world.and_then(Self::from_world))
             .await

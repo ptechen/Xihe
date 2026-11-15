@@ -1,10 +1,10 @@
-//! A scripted team: one agent looks a fact up, then hands the answer to another.
+//! 一个脚本化的团队：一个智能体查找事实，然后把答案交给另一个。
 //!
-//! Run with `cargo run -p xihe-demo`. No network is required; the model is a
-//! [`xihe::MockProvider`] with a fixed script.
+//! 用 `cargo run -p xihe-demo` 运行。无需网络；模型是一个带固定脚本的
+//! [`xihe::MockProvider`]。
 //!
-//! Routing and hand-off are scheduled systems, so the whole team runs inside
-//! one [`App::run`] instead of between separate passes.
+//! 路由与交接是被调度的系统，因此整个团队在一次 [`App::run`] 内运行，
+//! 而非分散在多个独立的遍次之间。
 
 use xihe::prelude::*;
 use xihe::{Handoff, HandoffWhenFinished, MockProvider, Reply, Roster, RouteTask, Router, SystemSpec};

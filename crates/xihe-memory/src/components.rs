@@ -1,17 +1,16 @@
-//! `AgentMemory`: one agent's working state on top of a [`MemoryStore`].
+//! `AgentMemory`：一个智能体在 [`MemoryStore`] 之上的工作状态。
 //!
-//! The store keeps *what happened* (turns, facts, tool output); this layer
-//! keeps *what the agent is currently doing about it* — focus points, the task
-//! plan, notes and the latest summary. Keeping them separate is what lets
-//! several agents share one long-term store: records are attributed to an
-//! [`Entity`] owner, and the working state lives in one record per agent that
-//! is replaced on every write, so a restart can [`reload`](AgentMemory::reload)
-//! it from the same store.
+//! 存储保存*发生了什么*（轮、事实、工具输出）；本层保存
+//! *智能体当前正就此做什么*——关注点、任务计划、注释与最新摘要。
+//! 把它们分开，正是让多个智能体共享一份长期存储的原因：记录
+//! 归属到一个 [`Entity`] 所有者，而工作状态存于每智能体一条、
+//! 每次写入即替换的记录中，因此重启能从同一存储
+//! [`reload`](AgentMemory::reload) 它。
 //!
-//! The dialogue window is a different thing again
-//! ([`crate::conversation::ConversationWindow`]): verbatim turns assembled into
-//! a prompt. It is not stored here, so one session can be windowed while
-//! memories are kept for many.
+//! 对话窗口又是另一回事
+//! （[`crate::conversation::ConversationWindow`]）：组装成提示词的
+//! 逐字轮。它不存在这里，因此一个会话可以被窗口化，
+//! 而记忆为许多会话保留。
 
 use std::sync::Arc;
 
@@ -24,20 +23,20 @@ use crate::record::{MemoryKind, MemoryQuery, MemoryRecord, RetentionPolicy, Scor
 use crate::reflection::{ReflectionBudget, ReflectionStep, reflect, similar};
 use crate::store::{MemoryStats, MemoryStore};
 
-/// Tag marking the record that holds an agent's working state.
+/// 标记持有智能体工作状态之记录的标签。
 pub const STATE_TAG: &str = "xihe:state";
 
-/// The focus, plan, notes and summary an agent carries between turns.
+/// 智能体在轮之间携带的关注、计划、注释与摘要。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkingState {
-    /// What the agent is currently optimising for, oldest first.
+    /// 智能体当前正在优化什么，最旧的在前。
     pub focus: Vec<String>,
-    /// Free-form `kind: text` observations, newest last.
+    /// 自由格式的 `kind: text` 观察，最新的在后。
     pub notes: Vec<String>,
-    /// The most recent summary; reflection reads this.
+    /// 最近的摘要；反思读取它。
     pub summary: String,
     #[serde(default)]
-    /// The task plan and its cursor.
+    /// 任务计划及其游标。
     pub plan: TaskPlan,
 }
 
@@ -50,11 +49,10 @@ impl WorkingState {
     }
 }
 
-/// One agent's memory bucket over an arbitrary store.
+/// 一个智能体在任意存储之上的记忆桶。
 ///
-/// Cloning is cheap and shares the store: two clones see each other's writes
-/// only after a [`reload`](AgentMemory::reload), which is the same contract the
-/// store itself offers.
+/// 克隆廉价且共享存储：两个克隆只有在 [`reload`](AgentMemory::reload)
+/// 之后才看到彼此的写入，这与存储本身提供的契约相同。
 #[derive(Clone)]
 pub struct AgentMemory {
     store: Arc<dyn MemoryStore>,
@@ -65,7 +63,7 @@ pub struct AgentMemory {
 }
 
 impl AgentMemory {
-    /// A bucket whose records are attributed to `owner`.
+    /// 记录归属到 `owner` 的桶。
     pub fn new(store: Arc<dyn MemoryStore>, owner: Entity) -> Self {
         Self {
             store,
@@ -76,7 +74,7 @@ impl AgentMemory {
         }
     }
 
-    /// A bucket that is not attributed to an entity yet, e.g. during bootstrap.
+    /// 尚未归属到实体的桶，例如引导期间。
     pub fn unowned(store: Arc<dyn MemoryStore>) -> Self {
         Self {
             store,
@@ -87,48 +85,48 @@ impl AgentMemory {
         }
     }
 
-    /// File the turn trace under this conversation.
+    /// 把轮追踪归档到此对话下。
     pub fn with_session(mut self, session: impl Into<String>) -> Self {
         self.session = Some(session.into());
         self
     }
 
-    /// The entity whose records this bucket owns.
+    /// 此桶拥有其记录的实体。
     pub fn owner(&self) -> Option<Entity> {
         self.owner
     }
 
-    /// The conversation the turn trace is filed under.
+    /// 轮追踪所归档的对话。
     pub fn session(&self) -> Option<&str> {
         self.session.as_deref()
     }
 
-    /// The underlying store, for direct record access.
+    /// 底层存储，用于直接访问记录。
     pub fn store(&self) -> &Arc<dyn MemoryStore> {
         &self.store
     }
 
-    /// The cached working state.
+    /// 缓存的工作状态。
     pub fn state(&self) -> &WorkingState {
         &self.state
     }
 
-    /// Focus points, oldest first.
+    /// 关注点，最旧的在前。
     pub fn focus(&self) -> &[String] {
         &self.state.focus
     }
 
-    /// Notes, oldest first.
+    /// 注释，最旧的在前。
     pub fn notes(&self) -> &[String] {
         &self.state.notes
     }
 
-    /// The task plan.
+    /// 任务计划。
     pub fn plan(&self) -> &TaskPlan {
         &self.state.plan
     }
 
-    /// The latest summary, if one was written.
+    /// 最新摘要（若已写入）。
     pub fn summary(&self) -> Option<&str> {
         (!self.state.summary.is_empty()).then_some(self.state.summary.as_str())
     }
@@ -144,7 +142,7 @@ impl AgentMemory {
         record
     }
 
-    /// Write the working state as one record, replacing the previous one.
+    /// 把工作状态写为一条记录，替换前一条。
     async fn persist(&mut self) -> MemoryResult<()> {
         if self.state.is_empty() {
             if let Some(id) = self.state_id.take() {
@@ -154,8 +152,8 @@ impl AgentMemory {
         }
         let json = serde_json::to_string(&self.state)
             .map_err(MemoryError::storage)?;
-        // The record's text *is* the serialised state: `reload` parses it back,
-        // and the store embeds it so a summary search can find the agent's focus.
+        // 记录的文本*就是*序列化后的状态：`reload` 把它解析回来，
+        // 存储嵌入它，使摘要搜索能找到智能体的关注。
         let record = self
             .record_builder(MemoryKind::Reflection, json)
             .with_tag(STATE_TAG)
@@ -168,10 +166,10 @@ impl AgentMemory {
         Ok(())
     }
 
-    /// Read the working state back out of the store.
+    /// 从存储中读回工作状态。
     ///
-    /// The newest state record for this owner wins; a record left behind by an
-    /// older process is forgotten so the store does not grow on every restart.
+    /// 此所有者最新的状态记录胜出；较早进程遗留的记录会被忘记，
+    /// 使存储不会在每次重启时增长。
     pub async fn reload(&mut self) -> MemoryResult<bool> {
         let tag = STATE_TAG.to_string();
         let owner = self.owner;
@@ -196,12 +194,12 @@ impl AgentMemory {
         Ok(true)
     }
 
-    /// The id of the record holding the working state, if written.
+    /// 持有工作状态之记录的 id（若已写入）。
     pub fn state_id(&self) -> Option<u64> {
         self.state_id
     }
 
-    /// Replace the focus points, trimming the oldest to fit `budget`.
+    /// 替换关注点，裁掉最旧的以适配 `budget`。
     pub async fn set_focus(&mut self, items: &[String], budget: usize) -> MemoryResult<()> {
         if budget == 0 {
             return Err(MemoryError::config("the focus budget must be at least 1"));
@@ -214,7 +212,7 @@ impl AgentMemory {
         self.persist().await
     }
 
-    /// Add focus points, skipping ones already tracked in other words.
+    /// 添加关注点，跳过已用其他措辞追踪的。
     pub async fn add_focus(&mut self, items: &[String], budget: &ReflectionBudget) -> MemoryResult<usize> {
         budget.validate()?;
         let mut added = 0;
@@ -245,13 +243,13 @@ impl AgentMemory {
         Ok(added)
     }
 
-    /// Replace the notes; duplicates and blanks are dropped.
+    /// 替换注释；重复与空白被丢弃。
     pub async fn set_notes(&mut self, notes: &[String]) -> MemoryResult<()> {
         self.state.notes = dedup(notes.iter().map(|note| note.trim().to_string()));
         self.persist().await
     }
 
-    /// Append a `kind: text` note; repeating the same note changes nothing.
+    /// 追加一条 `kind: text` 注释；重复同一注释不改变任何内容。
     pub async fn add_note(&mut self, kind: &str, text: &str) -> MemoryResult<bool> {
         let kind = kind.trim();
         let text = text.trim();
@@ -267,24 +265,24 @@ impl AgentMemory {
         Ok(true)
     }
 
-    /// Store the summary that the next reflection reads.
+    /// 存储下一次反思所读取的摘要。
     pub async fn set_summary(&mut self, summary: &str) -> MemoryResult<()> {
         self.state.summary = summary.trim().to_string();
         self.persist().await
     }
 
-    /// Replace the task plan.
+    /// 替换任务计划。
     pub async fn set_plan(&mut self, plan: TaskPlan) -> MemoryResult<()> {
         self.state.plan = plan;
         self.persist().await
     }
 
-    /// Forget the plan; focus and notes are untouched.
+    /// 忘记计划；关注与注释不受影响。
     pub async fn clear_plan(&mut self) -> MemoryResult<()> {
         self.set_plan(TaskPlan::default()).await
     }
 
-    /// Mark the current step complete and return it, or `None` when finished.
+    /// 标记当前步骤完成并返回它，结束时返回 `None`。
     pub async fn complete_plan_step(&mut self) -> MemoryResult<Option<String>> {
         let done = self.state.plan.advance();
         if done.is_some() {
@@ -293,11 +291,11 @@ impl AgentMemory {
         Ok(done)
     }
 
-    /// Turn the stored summary into focus points, facts, notes and a plan.
+    /// 把存储的摘要变成关注点、事实、注释与一个计划。
     ///
-    /// `tool_activity` and `failures` describe the window the summary covers.
-    /// The budget caps what one pass may add, so a noisy summary cannot flood
-    /// the focus list. Returns the steps that were applied.
+    /// `tool_activity` 与 `failures` 描述摘要所覆盖的窗口。
+    /// 预算限制一趟可添加的量，因此嘈杂的摘要不会淹没关注列表。
+    /// 返回已应用的步骤。
     pub async fn apply_reflection(
         &mut self,
         tool_activity: usize,
@@ -351,13 +349,13 @@ impl AgentMemory {
         Ok(applied)
     }
 
-    /// Store a record of `kind` with this agent as its owner.
+    /// 以本智能体为所有者存储一条 `kind` 记录。
     pub async fn remember(&mut self, kind: MemoryKind, text: &str) -> MemoryResult<u64> {
         let record = self.record_builder(kind, text.trim().to_string());
         self.store.insert(record).await
     }
 
-    /// Append one turn's trace: what came in, what went out, which tools ran.
+    /// 追加一轮的追踪：输入了什么、输出了什么、运行了哪些工具。
     pub async fn record_turn(
         &mut self,
         turn: u64,
@@ -376,7 +374,7 @@ impl AgentMemory {
         self.store.insert(record).await
     }
 
-    /// The most recent turn traces, newest first.
+    /// 最近的轮追踪，最新的在前。
     pub async fn turn_trace(&self, limit: usize) -> MemoryResult<Vec<MemoryRecord>> {
         let owner = self.owner;
         let session = self.session.clone();
@@ -392,7 +390,7 @@ impl AgentMemory {
         Ok(records)
     }
 
-    /// Semantic search over the store, scoped to this agent when it has an owner.
+    /// 在存储上做语义搜索，当本智能体有所有者时限定到它。
     pub async fn recall(&self, query: &str, top_k: usize) -> MemoryResult<Vec<ScoredRecord>> {
         let mut builder = MemoryQuery::text(query).with_top_k(top_k.max(1));
         if let Some(owner) = self.owner {
@@ -401,7 +399,7 @@ impl AgentMemory {
         self.store.search(&builder).await
     }
 
-    /// Search restricted to one kind, e.g. durable facts.
+    /// 限制到一个类别的搜索，例如持久事实。
     pub async fn recall_kind(
         &self,
         query: &str,
@@ -417,12 +415,12 @@ impl AgentMemory {
         self.store.search(&builder).await
     }
 
-    /// Fetch one record by id, whatever owns it.
+    /// 按 id 取一条记录，无论谁拥有它。
     pub async fn load(&self, id: u64) -> MemoryResult<Option<MemoryRecord>> {
         self.store.get(id).await
     }
 
-    /// Delete a record. The working-state record is rewritten, not deleted.
+    /// 删除一条记录。工作状态记录被重写，而非删除。
     pub async fn forget(&self, id: u64) -> MemoryResult<bool> {
         if self.state_id == Some(id) {
             return Err(MemoryError::config(
@@ -432,7 +430,7 @@ impl AgentMemory {
         self.store.remove(id).await
     }
 
-    /// Drop every memory owned by an agent; the usual cleanup when an entity dies.
+    /// 丢弃某智能体拥有的每条记忆；实体死亡时的常规清理。
     pub async fn forget_owner(&mut self, owner: Entity) -> MemoryResult<usize> {
         let removed = self.store.forget_entity(owner).await?;
         if self.owner == Some(owner) {
@@ -442,17 +440,17 @@ impl AgentMemory {
         Ok(removed)
     }
 
-    /// Apply a retention policy to the whole store.
+    /// 对整个存储应用保留策略。
     pub async fn consolidate(&self, policy: &RetentionPolicy) -> MemoryResult<usize> {
         self.store.consolidate(policy).await
     }
 
-    /// Counters of the underlying store.
+    /// 底层存储的计数器。
     pub async fn stats(&self) -> MemoryStats {
         self.store.stats().await
     }
 
-    /// The compact block the agent feeds back into its own prompt.
+    /// 智能体喂回自身提示词的紧凑块。
     pub fn render_working_state(&self) -> String {
         let mut sections = Vec::new();
         if !self.state.focus.is_empty() {
@@ -470,8 +468,8 @@ impl AgentMemory {
         sections.join("\n")
     }
 
-    /// Timestamp used for expiry checks; kept here so callers do not import
-    /// [`crate::record::now_ms`] just to compare a record against the clock.
+    /// 用于过期检查的时间戳；放在这里，使调用者无需仅为
+    /// 把记录与时钟比较而导入 [`crate::record::now_ms`]。
     pub fn now(&self) -> u64 {
         now_ms()
     }
@@ -495,19 +493,19 @@ fn dedup(items: impl Iterator<Item = String>) -> Vec<String> {
     out
 }
 
-/// The current task plan: ordered steps plus a cursor.
+/// 当前任务计划：有序步骤加一个游标。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskPlan {
-    /// What the plan is trying to achieve.
+    /// 计划试图达成什么。
     pub goal: String,
-    /// The steps in order.
+    /// 按顺序的步骤。
     pub steps: Vec<String>,
-    /// Index of the step in progress; `steps.len()` means the plan is finished.
+    /// 进行中步骤的索引；`steps.len()` 表示计划已完成。
     pub current: usize,
 }
 
 impl TaskPlan {
-    /// An explicit plan, starting at the first step.
+    /// 显式计划，从第一步开始。
     pub fn new(goal: impl Into<String>, steps: Vec<String>) -> Self {
         Self {
             goal: goal.into(),
@@ -516,8 +514,8 @@ impl TaskPlan {
         }
     }
 
-    /// Derive a plan from one observation: split on sentence boundaries and
-    /// keep at most `max_steps` clauses.
+    /// 从一条观察派生计划：按句子边界拆分，
+    /// 至多保留 `max_steps` 个子句。
     pub fn from_observation(text: &str, max_steps: usize) -> Self {
         let max_steps = max_steps.max(1);
         let mut steps: Vec<String> = text
@@ -540,27 +538,27 @@ impl TaskPlan {
         }
     }
 
-    /// True when there is nothing planned.
+    /// 当没有任何计划时为真。
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
 
-    /// The step in progress, if any.
+    /// 进行中的步骤（若有）。
     pub fn current_step(&self) -> Option<&str> {
         self.steps.get(self.current).map(String::as_str)
     }
 
-    /// `(done, total)`; the plan is finished when they are equal.
+    /// `(done, total)`；二者相等时计划完成。
     pub fn progress(&self) -> (usize, usize) {
         (self.current.min(self.steps.len()), self.steps.len())
     }
 
-    /// True once every step is done.
+    /// 一旦每个步骤都完成即为真。
     pub fn complete(&self) -> bool {
         !self.steps.is_empty() && self.current >= self.steps.len()
     }
 
-    /// Mark the current step done; `None` when there is nothing left.
+    /// 标记当前步骤完成；无剩余时返回 `None`。
     pub fn advance(&mut self) -> Option<String> {
         if self.complete() || self.steps.is_empty() {
             return None;
@@ -570,7 +568,7 @@ impl TaskPlan {
         Some(done)
     }
 
-    /// The steps with their status, for the prompt.
+    /// 带状态的步骤，用于提示词。
     pub fn render(&self) -> Vec<String> {
         self.steps
             .iter()
@@ -598,7 +596,7 @@ fn as_sentence(clause: &str) -> String {
     format!("{head}{}.", chars.as_str())
 }
 
-/// Format turn-trace records for the prompt.
+/// 为提示词格式化轮追踪记录。
 pub fn agent_turn_summary(records: &[MemoryRecord]) -> String {
     let mut lines = Vec::new();
     for record in records {
@@ -645,7 +643,7 @@ mod tests {
         Arc::new(InMemoryStore::with_embedder(HashingEmbedder::default()))
     }
 
-    /// A bucket over its own store, so each test starts empty.
+    /// 在其自有存储之上的桶，使每个测试从空开始。
     fn memory_at(index: u32) -> (Entity, AgentMemory) {
         let owner = Entity::from_raw(index, 1);
         (owner, AgentMemory::new(shared_store(), owner))
@@ -924,7 +922,7 @@ mod tests {
         let owner = entity(19);
         let mut memory = AgentMemory::new(store.clone(), owner);
         memory.set_focus(&["first".to_string()], 2).await.unwrap();
-        // Simulate an older process leaving a record behind.
+        // 模拟一个较早进程遗留一条记录。
         let stale = MemoryRecord {
             id: 0,
             text: json!({"focus": ["older"], "notes": [], "summary": "", "plan": {"goal": "", "steps": [], "current": 0}}).to_string(),
@@ -948,8 +946,8 @@ mod tests {
         let store = shared_store();
         let owner = entity(20);
         let memory = AgentMemory::new(store.clone(), owner);
-        // A perception written in an earlier run: the clock, not the kind, is
-        // what makes it collectable.
+        // 较早运行中写入的一条感知：使它可回收的是时钟，
+        // 而非类别。
         let ancient = MemoryRecord::at(
             MemoryKind::Observation,
             "a transient perception",

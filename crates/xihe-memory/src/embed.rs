@@ -1,41 +1,40 @@
-//! Vector embeddings: the numeric side of recall.
+//! 向量嵌入：召回的数值侧。
 //!
-//! A production agent would call a real embedding model; this crate ships a
-//! deterministic [feature-hashing](HashingEmbedder) embedder so recall, ranking
-//! and persistence are testable with no network and no weights to download. The
-//! [`Embedder`] trait is the seam: swap in an HTTP or local-model embedder and
-//! every store keeps working.
+//! 生产级智能体会调用真实的嵌入模型；本 crate 自带一个确定性的
+//! [特征哈希](HashingEmbedder) 嵌入器，使召回、排序与持久化无需网络、
+//! 无需下载权重即可测试。[`Embedder`] trait 是接缝：换入 HTTP 或
+//! 本地模型嵌入器，每个存储都继续工作。
 
 use async_trait::async_trait;
 
 use crate::error::{MemoryError, MemoryResult};
 
-/// A dense vector.
+/// 一个稠密向量。
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Embedding(pub Vec<f64>);
 
 impl Embedding {
-    /// Wrap a vector, normally already L2-normalised.
+    /// 包装一个向量，通常已做 L2 归一化。
     pub fn new(values: Vec<f64>) -> Self {
         Self(values)
     }
 
-    /// A zero vector of `dimensions`, used as a placeholder.
+    /// `dimensions` 维的零向量，用作占位。
     pub fn zeros(dimensions: usize) -> Self {
         Self(vec![0.0; dimensions])
     }
 
-    /// Vector width; the store validates against its embedder.
+    /// 向量宽度；存储据此对照其嵌入器校验。
     pub fn dimensions(&self) -> usize {
         self.0.len()
     }
 
-    /// Euclidean length.
+    /// 欧几里得长度。
     pub fn norm(&self) -> f64 {
         self.0.iter().map(|value| value * value).sum::<f64>().sqrt()
     }
 
-    /// Unit-length copy; a zero vector normalises to itself.
+    /// 单位长度副本；零向量归一化后仍是自身。
     pub fn normalized(&self) -> Self {
         let norm = self.norm();
         if norm == 0.0 {
@@ -44,7 +43,7 @@ impl Embedding {
         Self(self.0.iter().map(|value| value / norm).collect())
     }
 
-    /// Dot product.
+    /// 点积。
     pub fn dot(&self, other: &Self) -> f64 {
         self.0
             .iter()
@@ -53,7 +52,7 @@ impl Embedding {
             .sum()
     }
 
-    /// Cosine similarity, in `-1.0..=1.0`; vectors of different widths score 0.
+    /// 余弦相似度，位于 `-1.0..=1.0`；宽度不同的向量得分为 0。
     pub fn cosine(&self, other: &Self) -> f64 {
         if self.dimensions() != other.dimensions() || self.0.is_empty() {
             return 0.0;
@@ -65,7 +64,7 @@ impl Embedding {
         self.dot(other) / denominator
     }
 
-    /// L2 distance; unlike cosine it grows with magnitude.
+    /// L2 距离；与余弦不同，它随幅值增长。
     pub fn distance(&self, other: &Self) -> f64 {
         if self.dimensions() != other.dimensions() {
             return f64::INFINITY;
@@ -78,8 +77,8 @@ impl Embedding {
             .sqrt()
     }
 
-    /// Average several vectors into one, the cheap way to fold a multi-turn
-    /// episode into a single memory.
+    /// 把若干向量平均为一个，这是把多轮片段折叠成
+    /// 单条记忆的廉价方式。
     pub fn mean(vectors: &[Embedding]) -> Option<Embedding> {
         let first = vectors.first()?;
         let dimensions = first.dimensions();
@@ -102,8 +101,8 @@ impl Embedding {
         ))
     }
 
-    /// Keep the `k` largest components, the trick that makes hashed embeddings
-    /// sparse and comparable.
+    /// 保留最大的 `k` 个分量，这一技巧使哈希嵌入
+    /// 稀疏且可比较。
     pub fn top_k(&self, k: usize) -> Vec<(usize, f64)> {
         let mut pairs: Vec<(usize, f64)> = self.0.iter().copied().enumerate().collect();
         pairs.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -114,19 +113,19 @@ impl Embedding {
 
 
 
-/// Turn text into vectors.
+/// 把文本变成向量。
 #[async_trait]
 pub trait Embedder: Send + Sync + 'static {
-    /// Vector width this embedder always produces.
+    /// 此嵌入器总是产出的向量宽度。
     fn dimensions(&self) -> usize;
 
-    /// A short name for logs and stored metadata.
+    /// 用于日志与存储元数据的短名。
     fn id(&self) -> &str;
 
-    /// Embed one string.
+    /// 嵌入一个字符串。
     async fn embed(&self, text: &str) -> MemoryResult<Embedding>;
 
-    /// Embed several strings, preserving order.
+    /// 嵌入若干字符串，保持顺序。
     async fn embed_all(&self, texts: &[String]) -> MemoryResult<Vec<Embedding>> {
         let mut out = Vec::with_capacity(texts.len());
         for text in texts {
@@ -135,21 +134,21 @@ pub trait Embedder: Send + Sync + 'static {
         Ok(out)
     }
 
-    /// Whether two texts would land on the same vector.
+    /// 两段文本是否会落在同一向量上。
     async fn is_same(&self, a: &str, b: &str) -> MemoryResult<bool> {
         Ok(self.embed(a).await? == self.embed(b).await?)
     }
 }
 
-/// Signed feature hashing over lower-cased words and character trigrams.
+/// 对小写化的词与字符三元组做带符号的特征哈希。
 ///
-/// Deterministic, allocation-light and surprisingly effective for the short,
-/// keyword-heavy texts agents exchange. It is not semantic: "buy milk" and
-/// "purchase dairy" will not match. Real agents should swap in a model.
+/// 确定性、低分配，对智能体交换的短小、关键词密集的文本出奇地有效。
+/// 它不是语义的："buy milk" 与 "purchase dairy" 不会匹配。
+/// 真实智能体应换入一个模型。
 #[derive(Clone, Debug)]
 pub struct HashingEmbedder {
     dimensions: usize,
-    /// Weight of character trigrams relative to whole words.
+    /// 字符三元组相对于整词的权重。
     trigram_weight: f64,
 }
 
@@ -160,7 +159,7 @@ impl Default for HashingEmbedder {
 }
 
 impl HashingEmbedder {
-    /// Build an embedder of the requested width.
+    /// 构建一个所请求宽度的嵌入器。
     pub fn new(dimensions: usize) -> Self {
         Self {
             dimensions: dimensions.max(8),
@@ -168,14 +167,14 @@ impl HashingEmbedder {
         }
     }
 
-    /// How much character-trigram signal to mix in, `0.0` to disable.
+    /// 混入多少字符三元组信号，`0.0` 表示禁用。
     pub const fn with_trigram_weight(mut self, weight: f64) -> Self {
         self.trigram_weight = weight;
         self
     }
 
-    /// FNV-1a: small, fast and stable across runs, which matters because stored
-    /// vectors must stay comparable after a restart.
+    /// FNV-1a：小、快且跨运行稳定，这很重要，因为存储的
+    /// 向量在重启后必须保持可比较。
     fn hash(bytes: &[u8]) -> u64 {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in bytes {
@@ -187,12 +186,12 @@ impl HashingEmbedder {
 
     fn add(values: &mut [f64], index: u64, weight: f64) {
         let slot = (index % values.len() as u64) as usize;
-        // The top bit decides the sign, so unrelated features rarely cancel out.
+        // 最高位决定符号，因此无关特征很少相互抵消。
         let sign = if index & (1 << 63) == 0 { 1.0 } else { -1.0 };
         values[slot] += sign * weight;
     }
 
-    /// Fill a vector from text; exposed so other embedders can reuse the tokeniser.
+    /// 从文本填充向量；公开以便其他嵌入器复用此分词器。
     pub fn features(&self, text: &str) -> Embedding {
         let mut values = vec![0.0; self.dimensions];
         let lowered = text.to_lowercase();
@@ -204,7 +203,7 @@ impl HashingEmbedder {
         while let Some(word) = words.next() {
             count += 1;
             Self::add(&mut values, Self::hash(word.as_bytes()), 1.0);
-            // Bigrams keep "not good" distinguishable from "good".
+            // 二元组让 "not good" 与 "good" 可区分。
             if let Some(next) = words.peek() {
                 let pair = format!("{word} {next}");
                 Self::add(&mut values, Self::hash(pair.as_bytes()), 0.6);
@@ -217,7 +216,7 @@ impl HashingEmbedder {
                 }
             }
         }
-        // Record length so a store can tell an empty text from a stop-word-only one.
+        // 记录长度，使存储能区分空文本与仅含停用词的文本。
         Self::add(&mut values, Self::hash(b"__len__"), (count as f64).sqrt() * 0.2);
         Embedding(values)
     }
@@ -238,17 +237,17 @@ impl Embedder for HashingEmbedder {
     }
 }
 
-/// An embedder that maps each distinct text to a fixed, pseudo-random vector.
+/// 把每个不同文本映射到一个固定伪随机向量的嵌入器。
 ///
-/// Useful when a test wants two texts to be *unrelated* — hashing would otherwise
-/// give shared words a shared direction.
+/// 当测试希望两段文本*无关*时有用——否则哈希会让
+/// 共享的词拥有共享的方向。
 #[derive(Clone, Debug, Default)]
 pub struct RandomEmbedder {
     dimensions: usize,
 }
 
 impl RandomEmbedder {
-    /// Build an embedder of the requested width.
+    /// 构建一个所请求宽度的嵌入器。
     pub fn new(dimensions: usize) -> Self {
         Self {
             dimensions: dimensions.max(8),
@@ -257,8 +256,8 @@ impl RandomEmbedder {
 
     fn vector(&self, text: &str) -> Embedding {
         let mut values = vec![0.0; self.dimensions];
-        // A linear congruential walk seeded by the text hash: deterministic, and
-        // any two different texts land on unrelated points.
+        // 以文本哈希为种子的线性同余游走：确定性，且
+        // 任意两段不同文本落在无关的点上。
         let mut state = HashingEmbedder::hash(text.as_bytes())
             .wrapping_mul(0x9E37_79B9_7F4A_7C15)
             .wrapping_add(1);
@@ -288,14 +287,14 @@ impl Embedder for RandomEmbedder {
     }
 }
 
-/// A fixed single-direction embedder, for tests that only need ordering.
+/// 固定单方向嵌入器，用于只需排序的测试。
 #[derive(Clone, Debug)]
 pub struct ConstantEmbedder {
     dimensions: usize,
 }
 
 impl ConstantEmbedder {
-    /// Build an embedder of the requested width.
+    /// 构建一个所请求宽度的嵌入器。
     pub fn new(dimensions: usize) -> Self {
         Self {
             dimensions: dimensions.max(2),
@@ -320,17 +319,17 @@ impl Embedder for ConstantEmbedder {
     }
 }
 
-/// An embedder whose vectors are the characters of the text, for debugging.
+/// 向量即文本字符的嵌入器，用于调试。
 ///
-/// Anything that fails to embed in a real deployment (a missing key, an offline
-/// model) can be simulated with [`FailingEmbedder`] instead.
+/// 真实部署中任何嵌入失败的情形（缺失密钥、离线模型）
+/// 都可改用 [`FailingEmbedder`] 模拟。
 #[derive(Clone, Debug)]
 pub struct CharacterEmbedder {
     dimensions: usize,
 }
 
 impl CharacterEmbedder {
-    /// Build an embedder of the requested width.
+    /// 构建一个所请求宽度的嵌入器。
     pub fn new(dimensions: usize) -> Self {
         Self {
             dimensions: dimensions.clamp(2, 128),
@@ -357,7 +356,7 @@ impl Embedder for CharacterEmbedder {
     }
 }
 
-/// Always fails, to exercise error paths.
+/// 总是失败，用于演练错误路径。
 #[derive(Clone, Debug)]
 pub struct FailingEmbedder {
     dimensions: usize,
@@ -365,7 +364,7 @@ pub struct FailingEmbedder {
 }
 
 impl FailingEmbedder {
-    /// Build an embedder that fails with `message`.
+    /// 构建一个以 `message` 失败的嵌入器。
     pub fn new(dimensions: usize, message: impl Into<String>) -> Self {
         Self {
             dimensions,
@@ -442,7 +441,7 @@ mod tests {
     fn top_k_keeps_the_largest_components() {
         let vector = Embedding(vec![0.1, -5.0, 3.0, 2.0]);
         let top = vector.top_k(2);
-        // Ordering is by signed magnitude, so the negative outlier ranks last.
+        // 按带符号的幅值排序，因此负的离群值排在最后。
         assert_eq!(top[0], (2, 3.0));
         assert_eq!(top[1], (3, 2.0));
         assert_eq!(vector.top_k(0).len(), 0);
@@ -475,9 +474,9 @@ mod tests {
 
     #[tokio::test]
     async fn negation_moves_the_vector_without_inverting_it() {
-        // A hashing embedder has no notion of scope: `not good` shares most of its
-        // n-grams with `good`, so negation shifts the vector without flipping it.
-        // Recall that depends on polarity belongs to the model, not this embedder.
+        // 哈希嵌入器没有作用域概念：`not good` 与 `good` 共享大部分
+        // n-gram，因此否定会移动向量而不翻转它。
+        // 依赖极性的召回属于模型，而非此嵌入器。
         let embedder = HashingEmbedder::new(512).with_trigram_weight(0.0);
         let positive = embedder.embed("the result is good").await.unwrap();
         let negated = embedder.embed("the result is not good").await.unwrap();

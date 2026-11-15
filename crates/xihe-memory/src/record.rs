@@ -1,17 +1,17 @@
-//! What a memory looks like: kind, payload, provenance and scoring.
+//! 记忆长什么样：类别、载荷、来源与评分。
 
 use serde::{Deserialize, Serialize};
 use xihe_core::Entity;
 
 use crate::embed::Embedding;
 
-/// Identifier of a stored memory, assigned by the store.
+/// 已存储记忆的标识符，由存储分配。
 pub type MemoryId = u64;
 
-/// Milliseconds since the Unix epoch, the unit every timestamp in this crate uses.
+/// 自 Unix 纪元起的毫秒数，本 crate 每个时间戳所用的单位。
 pub type Timestamp = u64;
 
-/// Wall-clock now, in [`Timestamp`] units.
+/// 挂钟当前时刻，以 [`Timestamp`] 为单位。
 pub fn now_ms() -> Timestamp {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -19,27 +19,27 @@ pub fn now_ms() -> Timestamp {
         .unwrap_or(0)
 }
 
-/// The sort of thing remembered, which drives retrieval filters and retention.
+/// 被记住之物的类别，它驱动检索过滤与保留。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MemoryKind {
-    /// A turn or episode of dialogue.
+    /// 一轮或一段对话。
     Conversation,
-    /// A stable statement about the world or the user.
+    /// 关于世界或用户的稳定陈述。
     Fact,
-    /// A single perception, often from a tool.
+    /// 单次感知，常来自工具。
     Observation,
-    /// A summary derived from other memories.
+    /// 从其他记忆派生的摘要。
     Reflection,
-    /// The raw output of a tool call.
+    /// 工具调用的原始输出。
     ToolResult,
-    /// Retrieved document text.
+    /// 检索到的文档文本。
     Document,
 }
 
 impl MemoryKind {
-    /// The kind's name in snake_case.
+    /// 类别的 snake_case 名字。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Conversation => "conversation",
@@ -51,12 +51,12 @@ impl MemoryKind {
         }
     }
 
-    /// Kinds worth keeping longest.
+    /// 值得保留最久的类别。
     pub fn is_durable(self) -> bool {
         matches!(self, Self::Fact | Self::Reflection)
     }
 
-    /// Kinds produced during a single turn.
+    /// 在单轮内产出的类别。
     pub fn is_ephemeral(self) -> bool {
         matches!(self, Self::Observation | Self::ToolResult)
     }
@@ -68,38 +68,38 @@ impl std::fmt::Display for MemoryKind {
     }
 }
 
-/// A remembered item plus everything needed to rank and expire it.
+/// 一条被记住的项，加上排序与过期所需的一切。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRecord {
-    /// Store-assigned identity.
+    /// 存储分配的身份。
     pub id: MemoryId,
-    /// What kind of memory this is.
+    /// 这是哪类记忆。
     pub kind: MemoryKind,
-    /// The remembered text.
+    /// 被记住的文本。
     pub text: String,
-    /// Vector form of [`MemoryRecord::text`].
+    /// [`MemoryRecord::text`] 的向量形式。
     pub embedding: Embedding,
-    /// The agent entity that stored it, when there is one.
+    /// 存储它的智能体实体（若有）。
     #[serde(default)]
     pub owner: Option<Entity>,
-    /// Conversation or task this memory belongs to.
+    /// 此记忆所属的对话或任务。
     #[serde(default)]
     pub session: Option<String>,
-    /// Free-form labels used for filtering.
+    /// 用于过滤的自由格式标签。
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Importance weight, normally `0.5..=2.0`.
+    /// 重要性权重，通常 `0.5..=2.0`。
     #[serde(default = "one")]
     pub salience: f64,
-    /// When the memory was written.
+    /// 记忆写入的时刻。
     pub created_at_ms: Timestamp,
-    /// When it was last retrieved.
+    /// 上次被检索的时刻。
     #[serde(default)]
     pub accessed_at_ms: Option<Timestamp>,
-    /// How often it has been retrieved.
+    /// 被检索的频率。
     #[serde(default)]
     pub access_count: u32,
-    /// Hard expiry, independent of the retention policy.
+    /// 硬性过期，独立于保留策略。
     #[serde(default)]
     pub expires_at_ms: Option<Timestamp>,
 }
@@ -109,7 +109,7 @@ fn one() -> f64 {
 }
 
 impl MemoryRecord {
-    /// A fresh record stamped with the current time.
+    /// 盖上当前时间戳的新记录。
     pub fn new(kind: MemoryKind, text: impl Into<String>, embedding: Embedding) -> Self {
         Self {
             id: 0,
@@ -127,7 +127,7 @@ impl MemoryRecord {
         }
     }
 
-    /// A record with a caller-supplied timestamp, for replays and tests.
+    /// 带调用者提供时间戳的记录，用于回放与测试。
     pub fn at(
         kind: MemoryKind,
         text: impl Into<String>,
@@ -140,84 +140,84 @@ impl MemoryRecord {
         }
     }
 
-    /// Override the store-assigned id, for replays.
+    /// 覆盖存储分配的 id，用于回放。
     pub fn with_id(mut self, id: MemoryId) -> Self {
         self.id = id;
         self
     }
 
-    /// Attribute the record to an agent entity.
+    /// 把记录归属到一个智能体实体。
     pub fn with_owner(mut self, owner: Entity) -> Self {
         self.owner = Some(owner);
         self
     }
 
-    /// Group the record under a conversation or task.
+    /// 把记录归入一个对话或任务。
     pub fn with_session(mut self, session: impl Into<String>) -> Self {
         self.session = Some(session.into());
         self
     }
 
-    /// Add one filter label.
+    /// 添加一个过滤标签。
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into());
         self
     }
 
-    /// Add several filter labels.
+    /// 添加若干过滤标签。
     pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.tags.extend(tags.into_iter().map(Into::into));
         self
     }
 
-    /// Weight the record in retrieval scoring.
+    /// 在检索评分中给记录加权。
     pub fn with_salience(mut self, salience: f64) -> Self {
         self.salience = salience;
         self
     }
 
-    /// Expire after `ttl`, relative to creation.
+    /// 在 `ttl` 后过期，相对于创建时刻。
     pub fn with_ttl(mut self, ttl: std::time::Duration) -> Self {
         self.expires_at_ms = Some(self.created_at_ms.saturating_add(ttl.as_millis() as u64));
         self
     }
 
-    /// True when the record carries this exact tag.
+    /// 当记录恰好带有此标签时为真。
     pub fn has_tag(&self, tag: &str) -> bool {
         self.tags.iter().any(|stored| stored == tag)
     }
 
-    /// Record a retrieval, which is what makes frequently used memories stick.
+    /// 记录一次检索，这正是让常用记忆留存的原因。
     pub fn touch(&mut self, at: Timestamp) {
         self.accessed_at_ms = Some(at);
         self.access_count = self.access_count.saturating_add(1);
     }
 
-    /// True once the hard expiry has passed.
+    /// 一旦硬性过期已过即为真。
     pub fn is_expired(&self, at: Timestamp) -> bool {
         self.expires_at_ms.is_some_and(|expiry| expiry <= at)
     }
 
-    /// Age in milliseconds, clamped at zero for clock skew.
+    /// 以毫秒计的年龄，为时钟偏移钳制到零。
     pub fn age_ms(&self, at: Timestamp) -> Timestamp {
         at.saturating_sub(self.created_at_ms)
     }
 
-    /// Time since the last retrieval, or the age if never retrieved.
+    /// 自上次检索以来的时间，若从未检索则为年龄。
     pub fn idle_ms(&self, at: Timestamp) -> Timestamp {
         let reference = self.accessed_at_ms.unwrap_or(self.created_at_ms);
         at.saturating_sub(reference)
     }
 
-    /// Semantic relevance: cosine similarity, weighted by importance.
+    /// 语义相关性：余弦相似度，按重要性加权。
     pub fn relevance(&self, similarity: f64) -> f64 {
         similarity.max(0.0) * self.salience
     }
 
-    /// Relevance with an exponential recency bonus.
+    /// 带指数新近性加成的相关性。
     ///
-    /// `half_life_ms` is how long it takes an otherwise-identical memory to lose
-    /// half its recency weight; `0` disables the decay.
+    /// `half_life_ms` 是一条其他方面相同的记忆失去一半新近性权重
+    /// 所需的时间；`0` 禁用衰减。
     pub fn scored(&self, similarity: f64, at: Timestamp, half_life_ms: u64) -> f64 {
         let base = self.relevance(similarity);
         if half_life_ms == 0 || base <= 0.0 {
@@ -225,12 +225,12 @@ impl MemoryRecord {
         }
         let age = self.age_ms(at) as f64;
         let decay = 0.5f64.powf(age / half_life_ms.max(1) as f64);
-        // A little reinforcement for memories that keep getting used.
+        // 对持续被使用的记忆给一点强化。
         let reinforcement = 1.0 + (self.access_count as f64).ln_1p() * 0.1;
         base * (0.5 + 0.5 * decay) * reinforcement
     }
 
-    /// Truncate the text for display in logs and prompts.
+    /// 截断文本以便在日志与提示词中显示。
     pub fn preview(&self, max_chars: usize) -> String {
         if self.text.chars().count() <= max_chars {
             return self.text.clone();
@@ -241,31 +241,31 @@ impl MemoryRecord {
     }
 }
 
-/// A retrieval request.
+/// 一个检索请求。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MemoryQuery {
-    /// Text to embed when `vector` is absent.
+    /// 当 `vector` 缺失时用于嵌入的文本。
     pub text: Option<String>,
-    /// A pre-computed query vector.
+    /// 预先算好的查询向量。
     pub vector: Option<Embedding>,
-    /// Allowed kinds; empty means all.
+    /// 允许的类别；空表示全部。
     pub kinds: Vec<MemoryKind>,
-    /// Required tags; empty means any.
+    /// 必需的标签；空表示任意。
     pub tags: Vec<String>,
-    /// Restrict to one agent entity.
+    /// 限制到单个智能体实体。
     pub owner: Option<Entity>,
-    /// Restrict to one session.
+    /// 限制到单个会话。
     pub session: Option<String>,
-    /// Result cap.
+    /// 结果上限。
     pub top_k: usize,
-    /// Minimum score, in `0.0..=1.0` before salience weighting.
+    /// 最低分，位于显著性加权前的 `0.0..=1.0`。
     pub min_score: f64,
-    /// Include records past their expiry.
+    /// 包含已过期的记录。
     pub include_expired: bool,
 }
 
 impl MemoryQuery {
-    /// A text query, embedded by the store before matching.
+    /// 文本查询，匹配前由存储嵌入。
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             text: Some(text.into()),
@@ -275,7 +275,7 @@ impl MemoryQuery {
         }
     }
 
-    /// A vector query, for callers that already embedded something.
+    /// 向量查询，供已嵌入某物的调用者使用。
     pub fn vector(vector: Embedding) -> Self {
         Self {
             vector: Some(vector),
@@ -285,55 +285,55 @@ impl MemoryQuery {
         }
     }
 
-    /// Restrict the search to one kind.
+    /// 把搜索限制到一个类别。
     pub fn with_kind(mut self, kind: MemoryKind) -> Self {
         self.kinds.push(kind);
         self
     }
 
-    /// Restrict the search to a set of kinds.
+    /// 把搜索限制到一组类别。
     pub fn with_kinds(mut self, kinds: impl IntoIterator<Item = MemoryKind>) -> Self {
         self.kinds.extend(kinds);
         self
     }
 
-    /// Require one tag.
+    /// 要求一个标签。
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into());
         self
     }
 
-    /// Restrict the search to one owner.
+    /// 把搜索限制到一个所有者。
     pub fn with_owner(mut self, owner: Entity) -> Self {
         self.owner = Some(owner);
         self
     }
 
-    /// Restrict the search to one session.
+    /// 把搜索限制到一个会话。
     pub fn with_session(mut self, session: impl Into<String>) -> Self {
         self.session = Some(session.into());
         self
     }
 
-    /// Return at most this many records.
+    /// 至多返回这么多记录。
     pub fn with_top_k(mut self, top_k: usize) -> Self {
         self.top_k = top_k;
         self
     }
 
-    /// Drop matches scoring below this.
+    /// 丢弃评分低于此值的匹配。
     pub fn with_min_score(mut self, min_score: f64) -> Self {
         self.min_score = min_score;
         self
     }
 
-    /// Include records past their expiry.
+    /// 包含已过期的记录。
     pub fn including_expired(mut self) -> Self {
         self.include_expired = true;
         self
     }
 
-    /// Does this record pass the query's non-score filters?
+    /// 此记录是否通过查询的非评分过滤？
     pub fn accepts(&self, record: &MemoryRecord, at: Timestamp) -> bool {
         if !self.include_expired && record.is_expired(at) {
             return false;
@@ -353,33 +353,33 @@ impl MemoryQuery {
         self.tags.iter().all(|tag| record.has_tag(tag))
     }
 
-    /// The similarity floor a record must clear to be returned at all.
+    /// 记录要被返回所必须达到的相似度下限。
     pub fn passes_score(&self, similarity: f64) -> bool {
         similarity >= self.min_score
     }
 }
 
-/// A record together with its retrieval score.
+/// 一条记录连同其检索评分。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScoredRecord {
-    /// The memory itself.
+    /// 记忆本身。
     pub record: MemoryRecord,
-    /// Its score for this query, higher first.
+    /// 它在此查询下的评分，越高越靠前。
     pub score: f64,
 }
 
 impl ScoredRecord {
-    /// Build a scored record.
+    /// 构建一条带评分的记录。
     pub fn new(record: MemoryRecord, score: f64) -> Self {
         Self { record, score }
     }
 
-    /// Convenience for prompt assembly.
+    /// 便于提示词组装。
     pub fn text(&self) -> &str {
         &self.record.text
     }
 
-    /// Sort by descending score with a stable tie-break on id.
+    /// 按评分降序排序，并以其 id 做稳定的平局裁决。
     pub fn sort(results: &mut [Self]) {
         results.sort_by(|a, b| {
             b.score
@@ -389,16 +389,16 @@ impl ScoredRecord {
     }
 }
 
-/// How a store trims itself.
+/// 存储如何裁剪自身。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RetentionPolicy {
-    /// Hard cap on records; the least valuable are dropped first.
+    /// 记录数硬上限；价值最低的先被丢弃。
     pub max_records: usize,
-    /// Drop anything older than this, in milliseconds; `0` disables.
+    /// 丢弃比这更旧的任何记录，以毫秒计；`0` 禁用。
     pub max_age_ms: u64,
-    /// Drop records scoring below this on `salience * reinforcement`.
+    /// 丢弃在 `salience * reinforcement` 上评分低于此值的记录。
     pub min_value: f64,
-    /// Recency half-life used when scoring for eviction.
+    /// 为驱逐评分时所用的新近性半衰期。
     pub half_life_ms: u64,
 }
 
@@ -414,7 +414,7 @@ impl Default for RetentionPolicy {
 }
 
 impl RetentionPolicy {
-    /// A policy capped at `max_records`.
+    /// 上限为 `max_records` 的策略。
     pub const fn with_max_records(max_records: usize) -> Self {
         Self {
             max_records,
@@ -424,19 +424,19 @@ impl RetentionPolicy {
         }
     }
 
-    /// Keep memories for at most `ttl`.
+    /// 记忆至多保留 `ttl`。
     pub fn with_max_age(mut self, ttl: std::time::Duration) -> Self {
         self.max_age_ms = ttl.as_millis() as u64;
         self
     }
 
-    /// Forget records whose salience and use cannot justify their space.
+    /// 忘记显著性与使用不足以证明其占用空间合理的记录。
     pub const fn with_min_value(mut self, min_value: f64) -> Self {
         self.min_value = min_value;
         self
     }
 
-    /// Long-run value of a record, independent of any query.
+    /// 记录的长期价值，独立于任何查询。
     pub fn value(&self, record: &MemoryRecord, at: Timestamp) -> f64 {
         let age = record.age_ms(at) as f64;
         let decay = if self.half_life_ms == 0 {
@@ -449,7 +449,7 @@ impl RetentionPolicy {
         record.salience * reinforcement * durability * (0.25 + 0.75 * decay)
     }
 
-    /// Decide which records to drop; pure, so the ordering is testable.
+    /// 决定丢弃哪些记录；纯函数，因此排序可测试。
     pub fn plan_evictions(&self, records: &[MemoryRecord], at: Timestamp) -> Vec<MemoryId> {
         let mut stale: Vec<MemoryId> = records
             .iter()
@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(MemoryKind::Document.to_string(), "document");
     }
 
-    /// An entity identified only by its index; tests do not need generations.
+    /// 仅由其索引标识的实体；测试不需要世代。
     fn owner_entity(index: u32) -> Entity {
         Entity::from_raw(index, 1)
     }

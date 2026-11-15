@@ -1,79 +1,79 @@
-//! Failures specific to memory: embedding, storage and persistence.
+//! 记忆特有的失败：嵌入、存储与持久化。
 
 use std::fmt::{self, Display, Formatter};
 
-/// What can go wrong while remembering.
+/// 记忆过程中可能出错的情形。
 #[derive(Clone, Debug, PartialEq)]
 pub enum MemoryError {
-    /// The embedder could not produce a vector.
+    /// 嵌入器无法产出向量。
     Embedding {
-        /// Why embedding failed.
+        /// 嵌入失败的原因。
         message: String,
     },
-    /// A vector did not match the store's configured dimensionality.
+    /// 向量与存储配置的维度不匹配。
     DimensionMismatch {
-        /// Width the store expects.
+        /// 存储期望的宽度。
         expected: usize,
-        /// Width the caller supplied.
+        /// 调用者提供的宽度。
         found: usize,
     },
-    /// The store could not be written or read.
+    /// 存储无法写入或读取。
     Storage {
-        /// What the storage layer reported.
+        /// 存储层报告的内容。
         message: String,
     },
-    /// A persistence file was unreadable or malformed.
+    /// 持久化文件不可读或格式错误。
     Persistence {
-        /// Path or line the operation choked on.
+        /// 操作卡住的路径或行。
         message: String,
     },
-    /// A caller-supplied budget or setting cannot be used as given.
+    /// 调用者提供的预算或设置无法按原样使用。
     Configuration {
-        /// What was rejected.
+        /// 被拒绝的内容。
         message: String,
     },
-    /// The feature is behind a cargo feature that is not enabled.
+    /// 该功能位于一个未启用的 cargo feature 之后。
     Disabled {
-        /// Name of the missing cargo feature.
+        /// 缺失的 cargo feature 名。
         feature: &'static str,
     },
 }
 
 impl MemoryError {
-    /// Wrap an embedding failure.
+    /// 包装一个嵌入失败。
     pub fn embedding(message: impl Display) -> Self {
         Self::Embedding {
             message: message.to_string(),
         }
     }
 
-    /// A vector of the wrong width reached a store of `expected` dimensions.
+    /// 宽度错误的向量到达了一个 `expected` 维的存储。
     pub fn dimension_mismatch(expected: usize, found: usize) -> Self {
         Self::DimensionMismatch { expected, found }
     }
 
-    /// Wrap a storage failure.
+    /// 包装一个存储失败。
     pub fn storage(message: impl Display) -> Self {
         Self::Storage {
             message: message.to_string(),
         }
     }
 
-    /// Wrap a persistence failure.
+    /// 包装一个持久化失败。
     pub fn persistence(message: impl Display) -> Self {
         Self::Persistence {
             message: message.to_string(),
         }
     }
 
-    /// Reject a budget or setting that would make memory behave badly.
+    /// 拒绝会使记忆行为异常的预算或设置。
     pub fn config(message: impl Display) -> Self {
         Self::Configuration {
             message: message.to_string(),
         }
     }
 
-    /// Say which cargo feature the caller needs.
+    /// 说明调用者需要哪个 cargo feature。
     pub const fn disabled(feature: &'static str) -> Self {
         Self::Disabled { feature }
     }
@@ -117,7 +117,7 @@ impl From<serde_json::Error> for MemoryError {
     }
 }
 
-/// The result type used across this crate.
+/// 本 crate 各处使用的结果类型。
 pub type MemoryResult<T> = Result<T, MemoryError>;
 
 #[cfg(test)]

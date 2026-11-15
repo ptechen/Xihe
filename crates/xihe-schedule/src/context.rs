@@ -1,4 +1,4 @@
-//! Handles handed to systems: the shared world, the frame counter and stop flags.
+//! 交给系统的句柄：共享世界、帧计数器与停止标志。
 
 use std::borrow::Cow;
 use std::fmt;
@@ -11,57 +11,56 @@ use xihe_core::{Resource, World};
 
 use crate::command::{Command, CommandQueue};
 
-/// `Send` handle to the world, shared by every system in a schedule.
+/// 指向世界的 `Send` 句柄，由调度器中的每个系统共享。
 ///
-/// Systems ask for a read or a write guard themselves; the scheduler only decides
-/// *who may hold which guard at the same time*, based on declared
-/// [`Access`](crate::Access).
+/// 系统自行请求读守卫或写守卫；调度器只基于声明的
+/// [`Access`](crate::Access) 决定*谁可以同时持有哪个守卫*。
 #[derive(Clone)]
 pub struct WorldHandle(Arc<RwLock<World>>);
 
 impl WorldHandle {
-    /// Wraps an existing world.
+    /// 包装一个已有世界。
     pub fn new(world: World) -> Self {
         Self(Arc::new(RwLock::new(world)))
     }
 
-    /// Wraps an empty world.
+    /// 包装一个空世界。
     pub fn empty() -> Self {
         Self::new(World::new())
     }
 
-    /// Shared access. Any number of readers coexist, which is what makes
-    /// read-only systems genuinely concurrent.
+    /// 共享访问。任意数量的读者共存，这正是让只读系统
+    /// 真正并发的原因。
     pub async fn read(&self) -> RwLockReadGuard<'_, World> {
         self.0.read().await
     }
 
-    /// Exclusive access.
+    /// 独占访问。
     pub async fn write(&self) -> RwLockWriteGuard<'_, World> {
         self.0.write().await
     }
 
-    /// Non-blocking shared access.
+    /// 非阻塞共享访问。
     pub fn try_read(&self) -> Option<RwLockReadGuard<'_, World>> {
         self.0.try_read().ok()
     }
 
-    /// Non-blocking exclusive access.
+    /// 非阻塞独占访问。
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, World>> {
         self.0.try_write().ok()
     }
 
-    /// `true` when a writer currently holds the lock.
+    /// 当前有写者持有锁时为 `true`。
     pub fn is_write_locked(&self) -> bool {
         self.0.try_read().is_err()
     }
 
-    /// Underlying lock, for drivers that need to spawn extra tasks.
+    /// 底层锁，供需要派生额外任务的驱动器使用。
     pub fn inner(&self) -> &Arc<RwLock<World>> {
         &self.0
     }
 
-    /// Borrow the world without async, failing when a guard is outstanding.
+    /// 非异步地借用世界，当有守卫未释放时失败。
     pub fn blocking_read<R>(&self, f: impl FnOnce(&World) -> R) -> Option<R> {
         self.try_read().map(|guard| f(&guard))
     }
@@ -81,7 +80,7 @@ impl fmt::Debug for WorldHandle {
     }
 }
 
-/// Cooperative shutdown flag shared by the driver and all systems.
+/// 由驱动器与所有系统共享的协作式关停标志。
 #[derive(Clone, Default)]
 pub struct StopToken(Arc<Inner>);
 
@@ -93,12 +92,12 @@ struct Inner {
 }
 
 impl StopToken {
-    /// A token that has not been signalled.
+    /// 一个尚未被触发的令牌。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Requests shutdown with a diagnostic reason.
+    /// 请求关停，并附带诊断原因。
     pub fn stop(&self, reason: impl Into<Cow<'static, str>>) {
         let changed = !self.0.stopped.swap(true, Ordering::AcqRel);
         if changed
@@ -109,17 +108,17 @@ impl StopToken {
         self.0.notify.notify_waiters();
     }
 
-    /// `true` once shutdown was requested.
+    /// 一旦请求了关停即为 `true`。
     pub fn is_stopped(&self) -> bool {
         self.0.stopped.load(Ordering::Acquire)
     }
 
-    /// Reason passed to [`StopToken::stop`].
+    /// 传给 [`StopToken::stop`] 的原因。
     pub fn reason(&self) -> Option<Cow<'static, str>> {
         self.0.reason.read_blocking()
     }
 
-    /// Resolves once shutdown is requested; safe to poll from many systems.
+    /// 一旦请求关停即完成；可安全地从多个系统轮询。
     pub async fn wait(&self) {
         loop {
             let notified = self.0.notify.notified();
@@ -130,7 +129,7 @@ impl StopToken {
         }
     }
 
-    /// Future that resolves on the earlier of shutdown or the timeout.
+    /// 在关停或超时两者中较早者发生时完成的 Future。
     pub async fn wait_timeout(&self, timeout: Duration) -> bool {
         tokio::time::timeout(timeout, self.wait()).await.is_ok()
     }
@@ -154,27 +153,26 @@ impl ReadBlocking for RwLock<Option<Cow<'static, str>>> {
     }
 }
 
-/// Everything a system needs, cheap to clone because every field is a handle.
+/// 系统所需的一切，克隆廉价，因为每个字段都是句柄。
 ///
-/// The context is passed **by value** so that a system's future owns it and stays
-/// `Send` — the requirement for spawning it onto a tokio worker in a parallel
-/// stage.
+/// 上下文**按值**传递，使系统的 future 拥有它并保持 `Send`——
+/// 这是在并行阶段中将它派生到 tokio worker 上的要求。
 #[derive(Clone)]
 pub struct SystemContext {
-    /// Shared world.
+    /// 共享世界。
     pub world: WorldHandle,
-    /// Deferred mutations applied at the next stage boundary.
+    /// 在下一个阶段边界应用的延迟变更。
     pub commands: CommandQueue,
-    /// Live frame counter, updated by the driver.
+    /// 实时帧计数器，由驱动器更新。
     frame: Arc<AtomicU64>,
-    /// Driver start time, used by time-based periodic systems.
+    /// 驱动器启动时间，供基于时间的周期系统使用。
     started: tokio::time::Instant,
-    /// Cooperative shutdown flag.
+    /// 协作式关停标志。
     stop: StopToken,
 }
 
 impl SystemContext {
-    /// Builds a context for a driver.
+    /// 为驱动器构建一个上下文。
     pub fn new(world: WorldHandle) -> Self {
         Self {
             world,
@@ -185,50 +183,50 @@ impl SystemContext {
         }
     }
 
-    /// Replaces the frame counter with a shared one (used by the driver).
+    /// 用一个共享的帧计数器替换当前的（由驱动器使用）。
     pub fn with_frame_counter(mut self, frame: Arc<AtomicU64>) -> Self {
         self.frame = frame;
         self
     }
 
-    /// Replaces the stop flag.
+    /// 替换停止标志。
     pub fn with_stop_token(mut self, stop: StopToken) -> Self {
         self.stop = stop;
         self
     }
 
-    /// Current frame number, starting at 0.
+    /// 当前帧号，从 0 开始。
     #[inline]
     pub fn frame_number(&self) -> u64 {
         self.frame.load(Ordering::Acquire)
     }
 
-    /// Advances the shared frame counter and returns the new value.
+    /// 推进共享帧计数器并返回新值。
     pub fn advance_frame(&self) -> u64 {
         self.frame.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    /// Time since the driver started.
+    /// 自驱动器启动以来的时间。
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
 
-    /// Stop flag of this run.
+    /// 本次运行的停止标志。
     pub fn stop_token(&self) -> &StopToken {
         &self.stop
     }
 
-    /// `true` once shutdown was requested.
+    /// 一旦请求了关停即为 `true`。
     pub fn is_stopping(&self) -> bool {
         self.stop.is_stopped()
     }
 
-    /// Requests shutdown of the whole app.
+    /// 请求关停整个应用。
     pub fn stop(&self, reason: impl Into<Cow<'static, str>>) {
         self.stop.stop(reason);
     }
 
-    /// Queues a deferred world mutation.
+    /// 将一个延迟的世界变更入队。
     pub fn enqueue<F>(&self, command: F)
     where
         F: FnOnce(&mut World) + Send + 'static,
@@ -236,7 +234,7 @@ impl SystemContext {
         self.commands.push(Command::new(command));
     }
 
-    /// Queues a named deferred world mutation.
+    /// 将一个命名的延迟世界变更入队。
     pub fn enqueue_named(&self, name: impl Into<Cow<'static, str>>, command: Command) {
         let mut command = command;
         if command.description.is_empty() {
@@ -245,19 +243,18 @@ impl SystemContext {
         self.commands.push(command);
     }
 
-    /// Number of queued commands.
+    /// 排队命令的数量。
     pub fn pending_commands(&self) -> usize {
         self.commands.len()
     }
 
-    /// Takes every queued command without applying them.
+    /// 取出每个排队的命令但不应用它们。
     pub fn take_commands(&self) -> Vec<Command> {
         self.commands.take_all()
     }
 
-    /// Applies every queued command under one write lock. The driver calls this at
-    /// stage boundaries; systems call it when they need their own writes visible
-    /// immediately.
+    /// 在一把写锁下应用每个排队的命令。驱动器在阶段边界调用它；
+    /// 系统在需要自己的写入立即可见时调用它。
     pub async fn apply_commands(&self) -> usize {
         let pending = self.commands.take_all();
         if pending.is_empty() {
@@ -271,7 +268,7 @@ impl SystemContext {
         count
     }
 
-    /// Runs `f` with shared world access.
+    /// 以共享世界访问运行 `f`。
     pub async fn with_world<R, F>(&self, f: F) -> R
     where
         F: FnOnce(&World) -> R + Send,
@@ -281,7 +278,7 @@ impl SystemContext {
         f(&world)
     }
 
-    /// Runs `f` with exclusive world access.
+    /// 以独占世界访问运行 `f`。
     pub async fn with_world_mut<R, F>(&self, f: F) -> R
     where
         F: FnOnce(&mut World) -> R + Send,
@@ -291,12 +288,12 @@ impl SystemContext {
         f(&mut world)
     }
 
-    /// Convenience: insert a resource.
+    /// 便捷方法：插入一个资源。
     pub async fn insert_resource<R: Resource>(&self, value: R) -> Option<R> {
         self.with_world_mut(move |world| world.insert_resource(value)).await
     }
 
-    /// Convenience: read a resource, `None` when absent.
+    /// 便捷方法：读取一个资源，缺失时为 `None`。
     pub async fn read_resource<R, F>(&self, f: F) -> R
     where
         R: Send + Clone,

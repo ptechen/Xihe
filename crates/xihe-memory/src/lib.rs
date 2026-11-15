@@ -1,23 +1,23 @@
-//! Agent memory for Xihe: embeddings, vector recall, dialogue windowing,
-//! working state and reflection.
+//! Xihe 的智能体记忆：嵌入、向量召回、对话窗口化、
+//! 工作状态与反思。
 //!
-//! The crate is arranged as a stack, each layer speaking to the one below it
-//! and never to the one above:
+//! 本 crate 组织为一个栈，每层只与其下一层对话，
+//! 绝不与上一层对话：
 //!
-//! | layer | what it answers |
+//! | 层 | 它回答什么 |
 //! |---|---|
-//! | [`embed`] | how does a piece of text become a comparable vector? |
-//! | [`record`] | what is a memory, and when is it worth keeping? |
-//! | [`store`] | how do we insert and retrieve many records? |
-//! | [`conversation`] | how do we keep a dialogue inside a token budget? |
-//! | [`reflection`] | what does a compressed dialogue tell the agent to do next? |
-//! | [`components`] | what does one agent currently believe, plan and note? |
-//! | [`persist`] (feature `persist`) | how does any of it survive a restart? |
+//! | [`embed`] | 一段文本如何变成可比较的向量？ |
+//! | [`record`] | 什么是记忆，何时值得保留？ |
+//! | [`store`] | 如何插入与检索许多记录？ |
+//! | [`conversation`] | 如何把对话保持在 token 预算内？ |
+//! | [`reflection`] | 压缩后的对话告诉智能体接下来做什么？ |
+//! | [`components`] | 一个智能体当前相信、计划与记录了什么？ |
+//! | [`persist`]（feature `persist`） | 这一切如何在重启后存续？ |
 //!
-//! Nothing here talks to a model: the [`Summariser`](reflection::Summariser)
-//! and [`Embedder`](embed::Embedder) seams let an LLM be plugged in by the
-//! agent layer, which already owns provider access. That keeps this crate
-//! offline-testable and free of a network dependency.
+//! 这里没有任何东西与模型对话：[`Summariser`](reflection::Summariser)
+//! 与 [`Embedder`](embed::Embedder) 接缝让智能体层插入 LLM，
+//! 该层已持有提供方访问。这使本 crate 可离线测试，
+//! 且不带网络依赖。
 //!
 //! ```
 //! use std::sync::Arc;
@@ -36,8 +36,8 @@
 //! memory
 //!     .remember(MemoryKind::Fact, "the export has yesterday's rows")
 //!     .await?;
-//! // The working-state record matches too: recall searches everything this
-//! // agent owns, not only the facts.
+//! // 工作状态记录也会匹配：召回搜索此智能体拥有的一切，
+//! // 而不仅是事实。
 //! let hits = memory.recall("when does the export refresh?", 3).await?;
 //! Ok(!hits.is_empty())
 //! # }
@@ -71,7 +71,7 @@ pub use store::{InMemoryStore, MemoryStats, MemoryStore, SearchOptions};
 #[cfg(feature = "persist")]
 pub use persist::{MemoryFile, append_journal, read_records, restore_snapshot, save_snapshot};
 
-/// The kinds this crate knows about, re-exported where the agent layer picks them.
+/// 本 crate 知道的类型，在智能体层取用处重新导出。
 pub mod prelude {
     pub use crate::components::{AgentMemory, TaskPlan};
     pub use crate::conversation::{ConversationWindow, SessionMemory, Speaker, Turn};

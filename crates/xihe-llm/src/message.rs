@@ -1,28 +1,28 @@
-//! The chat-completion data model: roles, messages, tool calls and parameters.
+//! 聊天补全数据模型：角色、消息、工具调用与参数。
 //!
-//! These types are provider-agnostic and serde-friendly so a conversation can be
-//! written to disk or replayed against [`crate::MockProvider`].
+//! 这些类型与提供方无关且对 serde 友好，因此对话可以写入磁盘，
+//! 或针对 [`crate::MockProvider`] 回放。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Who produced a message.
+/// 消息的产出者。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
-    /// Steering instructions, usually the first message.
+    /// 引导指令，通常是第一条消息。
     System,
-    /// Human (or upstream agent) input.
+    /// 人类（或上游智能体）输入。
     #[default]
     User,
-    /// Model output.
+    /// 模型输出。
     Assistant,
-    /// The result of a [`Role::Assistant`] tool call, carried back to the model.
+    /// [`Role::Assistant`] 工具调用的结果，回传给模型。
     Tool,
 }
 
 impl Role {
-    /// The wire spelling used by chat-completion APIs.
+    /// 聊天补全 API 使用的传输层拼写。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::System => "system",
@@ -32,37 +32,37 @@ impl Role {
         }
     }
 
-    /// True for [`Role::System`].
+    /// 对 [`Role::System`] 为真。
     pub fn is_system(self) -> bool {
         matches!(self, Self::System)
     }
 
-    /// True for [`Role::Assistant`].
+    /// 对 [`Role::Assistant`] 为真。
     pub fn is_assistant(self) -> bool {
         matches!(self, Self::Assistant)
     }
 }
 
-/// A single chat message: prose, tool calls, or a tool result.
+/// 单条聊天消息：文本、工具调用或工具结果。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
-    /// Who authored the message.
+    /// 消息的作者。
     pub role: Role,
-    /// The text payload.
+    /// 文本载荷。
     pub content: String,
-    /// Optional display name, used by multi-agent transcripts.
+    /// 可选的显示名，供多智能体转录使用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Calls the assistant asked the runtime to execute.
+    /// 助手请求运行时执行的调用。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
-    /// Set on [`Role::Tool`] messages to identify the call being answered.
+    /// 在 [`Role::Tool`] 消息上设置，用于标识所应答的调用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
-    /// Build a message for any role.
+    /// 为任意角色构建消息。
     pub fn new(role: Role, content: impl Into<String>) -> Self {
         Self {
             role,
@@ -71,22 +71,22 @@ impl ChatMessage {
         }
     }
 
-    /// A system instruction turn.
+    /// 一个系统指令轮。
     pub fn system(content: impl Into<String>) -> Self {
         Self::new(Role::System, content)
     }
 
-    /// A user turn.
+    /// 一个用户轮。
     pub fn user(content: impl Into<String>) -> Self {
         Self::new(Role::User, content)
     }
 
-    /// An assistant turn.
+    /// 一个助手轮。
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::new(Role::Assistant, content)
     }
 
-    /// A tool result, rendered as text for providers that want a string payload.
+    /// 一个工具结果，为需要字符串载荷的提供方渲染为文本。
     pub fn tool_result(call_id: impl Into<String>, payload: Value) -> Self {
         let content = match payload {
             Value::String(text) => text,
@@ -100,24 +100,24 @@ impl ChatMessage {
         }
     }
 
-    /// Label the author, used by multi-agent transcripts.
+    /// 标注作者，供多智能体转录使用。
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
-    /// Attach the calls the model wants executed.
+    /// 附上模型希望执行的调用。
     pub fn with_tool_calls(mut self, calls: Vec<ToolCall>) -> Self {
         self.tool_calls = calls;
         self
     }
 
-    /// Whether this turn requests tool work.
+    /// 本轮是否请求工具工作。
     pub fn calls_tools(&self) -> bool {
         !self.tool_calls.is_empty()
     }
 
-    /// Approximate token cost, used for windowing and budget guards.
+    /// 近似的 token 开销，用于窗口化与预算护栏。
     pub fn tokens(&self) -> usize {
         let mut text = self.content.len() + self.name.as_ref().map_or(0, String::len);
         for call in &self.tool_calls {
@@ -126,7 +126,7 @@ impl ChatMessage {
         crate::estimate_tokens(text)
     }
 
-    /// Collapse a run of messages into plain text, prefixing each line with its role.
+    /// 将一串消息折叠为纯文本，每行以其角色为前缀。
     pub fn to_transcript_line(&self) -> String {
         let speaker = self.name.as_deref().unwrap_or(self.role.as_str());
         if self.calls_tools() {
@@ -148,19 +148,19 @@ impl std::fmt::Display for ChatMessage {
     }
 }
 
-/// A function the model is allowed to invoke.
+/// 允许模型调用的函数。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolDescriptor {
-    /// The name the model must call.
+    /// 模型必须调用的名称。
     pub name: String,
-    /// What the tool does, shown to the model.
+    /// 工具的作用，展示给模型。
     pub description: String,
-    /// JSON Schema for the arguments object.
+    /// 参数对象的 JSON Schema。
     pub parameters: Value,
 }
 
 impl ToolDescriptor {
-    /// A descriptor with an empty argument-object schema.
+    /// 带空参数对象 schema 的描述符。
     pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -169,13 +169,13 @@ impl ToolDescriptor {
         }
     }
 
-    /// Attach a JSON Schema, typically built with the `json!` macro.
+    /// 附上 JSON Schema，通常用 `json!` 宏构建。
     pub fn with_parameters(mut self, schema: Value) -> Self {
         self.parameters = schema;
         self
     }
 
-    /// Declare one string argument, the 80% case for agent tools.
+    /// 声明一个字符串参数，这是智能体工具 80% 的情形。
     pub fn with_string_arg(self, key: &str, description: &str, required: bool) -> Self {
         self.with_argument(
             key,
@@ -184,7 +184,7 @@ impl ToolDescriptor {
         )
     }
 
-    /// Declare an argument with an arbitrary JSON Schema subschema.
+    /// 用任意 JSON Schema 子 schema 声明一个参数。
     pub fn with_argument(mut self, key: &str, schema: Value, required: bool) -> Self {
         if let Some(props) = self
             .parameters
@@ -208,12 +208,12 @@ impl ToolDescriptor {
         self
     }
 
-    /// A required string argument with a description for the model.
+    /// 一个必填字符串参数，附带面向模型的描述。
     pub fn with_required_string(self, key: &str, description: &str) -> Self {
         self.with_string_arg(key, description, true)
     }
 
-    /// Declared argument names, in schema order.
+    /// 已声明的参数名，按 schema 顺序。
     pub fn argument_names(&self) -> Vec<String> {
         self.parameters
             .get("properties")
@@ -222,7 +222,7 @@ impl ToolDescriptor {
             .unwrap_or_default()
     }
 
-    /// Whether `key` appears in the schema's `required` list.
+    /// `key` 是否出现在 schema 的 `required` 列表中。
     pub fn is_required(&self, key: &str) -> bool {
         self.parameters
             .get("required")
@@ -231,22 +231,22 @@ impl ToolDescriptor {
     }
 }
 
-/// A tool invocation requested by the model.
+/// 模型请求的一次工具调用。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
-    /// Provider-assigned id, echoed back by the matching tool result.
+    /// 提供方分配的 id，由匹配的工具结果回显。
     pub id: String,
-    /// The tool the model asked for.
+    /// 模型请求的工具。
     pub name: String,
-    /// Already-parsed arguments; providers send JSON text which we decode eagerly.
+    /// 已解析的参数；提供方发送 JSON 文本，我们即时解码。
     pub arguments: Value,
-    /// The raw argument string, kept so replays and debugging can see it verbatim.
+    /// 原始参数字符串，保留以便回放与调试能原样查看。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_arguments: Option<String>,
 }
 
 impl ToolCall {
-    /// Build a call from already-parsed arguments.
+    /// 由已解析的参数构建调用。
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -262,7 +262,7 @@ impl ToolCall {
         }
     }
 
-    /// Parse a provider's argument payload, falling back to an empty object.
+    /// 解析提供方的参数载荷，失败时回退为空对象。
     pub fn from_json_text(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -301,47 +301,46 @@ impl ToolCall {
         }
     }
 
-    /// The argument payload as providers want it: text, preferring what the
-    /// provider actually sent.
+    /// 提供方所需的参数载荷：文本，优先使用提供方实际发送的内容。
     pub fn arguments_string(&self) -> String {
         self.raw_arguments
             .clone()
             .unwrap_or_else(|| self.arguments.to_string())
     }
 
-    /// Look up one argument value.
+    /// 查找一个参数值。
     pub fn argument(&self, key: &str) -> Option<&Value> {
         self.arguments.get(key)
     }
 
-    /// Read a string argument; other types yield `None`.
+    /// 读取字符串参数；其他类型产出 `None`。
     pub fn string_argument(&self, key: &str) -> Option<&str> {
         self.argument(key).and_then(Value::as_str)
     }
 
-    /// A one-line rendering for logs and transcripts.
+    /// 供日志与转录使用的单行渲染。
     pub fn render(&self) -> String {
         format!("{}({})", self.name, self.arguments)
     }
 }
 
-/// Sampling knobs, mirroring the common chat-completion parameters.
+/// 采样旋钮，对应常见的聊天补全参数。
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenerationParams {
-    /// Sampling temperature; 0.0 is greedy decoding.
+    /// 采样温度；0.0 为贪心解码。
     ///
-    /// `f64` rather than `f32` because these values go straight into a JSON body
-    /// and 0.7 as an `f32` serialises as 0.699999988079071.
+    /// 用 `f64` 而非 `f32`，因为这些值直接进入 JSON 体，
+    /// 而 0.7 作为 `f32` 会序列化为 0.699999988079071。
     pub temperature: f64,
-    /// Nucleus sampling cut-off; `None` leaves it to the provider.
+    /// 核采样截断；`None` 交由提供方决定。
     pub top_p: Option<f64>,
-    /// Upper bound on the assistant turn.
+    /// 助手轮的上界。
     pub max_output_tokens: Option<u32>,
-    /// Sequences that end generation.
+    /// 结束生成的序列。
     pub stop: Vec<String>,
-    /// Request a deterministic run where the provider honours seeds.
+    /// 在提供方尊重种子时请求确定性运行。
     pub seed: Option<u64>,
-    /// Provider-specific extras forwarded verbatim in the request body.
+    /// 提供方特有的额外项，在请求体中原样转发。
     pub extensions: Value,
 }
 
@@ -359,7 +358,7 @@ impl Default for GenerationParams {
 }
 
 impl GenerationParams {
-    /// Greedy decoding with a fixed seed: what tests want.
+    /// 带固定种子的贪心解码：测试所需。
     pub fn deterministic() -> Self {
         Self {
             temperature: 0.0,
@@ -367,63 +366,63 @@ impl GenerationParams {
         }
     }
 
-    /// Set the temperature.
+    /// 设置温度。
     pub fn with_temperature(mut self, value: f64) -> Self {
         self.temperature = value;
         self
     }
 
-    /// Cap the assistant turn.
+    /// 为助手轮设置上限。
     pub fn with_max_output_tokens(mut self, value: u32) -> Self {
         self.max_output_tokens = Some(value);
         self
     }
 
-    /// Pin the seed.
+    /// 固定种子。
     pub fn with_seed(mut self, value: u64) -> Self {
         self.seed = Some(value);
         self
     }
 }
 
-/// How strongly the runtime insists on a tool call.
+/// 运行时坚持要求工具调用的强度。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ToolChoice {
     #[default]
-    /// Let the model decide.
+    /// 让模型决定。
     Auto,
-    /// Text only, even when tools are attached.
+    /// 仅文本，即使附上了工具。
     None,
-    /// At least one call must be produced.
+    /// 必须产出至少一个调用。
     Required,
-    /// Force one specific tool.
+    /// 强制使用某个特定工具。
     Only(String),
 }
 
 impl ToolChoice {
-    /// True when tools are disabled for this request.
+    /// 当此请求禁用工具时为真。
     pub fn is_none(&self) -> bool {
         matches!(self, Self::None)
     }
 }
 
-/// Why a generation stopped.
+/// 生成停止的原因。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FinishReason {
-    /// A complete answer.
+    /// 一个完整答案。
     Stop,
-    /// The model wants tools executed.
+    /// 模型希望执行工具。
     ToolCalls,
-    /// Cut off by the token budget.
+    /// 被 token 预算截断。
     Length,
-    /// Refused by the provider's safety filter.
+    /// 被提供方的安全过滤器拒绝。
     ContentFilter,
-    /// Cancelled by the runtime.
+    /// 被运行时取消。
     Aborted,
 }
 
 impl FinishReason {
-    /// Map a provider's free-form string onto our small set.
+    /// 将提供方的自由格式字符串映射到我们的小集合。
     pub fn parse(value: &str) -> Self {
         match value {
             "tool_calls" | "function_call" => Self::ToolCalls,
@@ -434,7 +433,7 @@ impl FinishReason {
         }
     }
 
-    /// The wire spelling.
+    /// 传输层拼写。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Stop => "stop",
@@ -446,19 +445,19 @@ impl FinishReason {
     }
 }
 
-/// Token accounting for one call or accumulated over a run.
+/// 单次调用或整个运行累计的 token 计量。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// Tokens consumed by the prompt.
+    /// 提示词消耗的 token。
     pub prompt_tokens: u64,
-    /// Tokens produced by the reply.
+    /// 回复产出的 token。
     pub completion_tokens: u64,
-    /// The reported sum of the two.
+    /// 两者之和的报告值。
     pub total_tokens: u64,
 }
 
 impl TokenUsage {
-    /// Compute the total from its parts.
+    /// 由各部分计算总和。
     pub fn new(prompt_tokens: u64, completion_tokens: u64) -> Self {
         Self {
             prompt_tokens,
@@ -467,14 +466,14 @@ impl TokenUsage {
         }
     }
 
-    /// Add another call's usage; totals are recomputed, not trusted from the wire.
+    /// 累加另一次调用的用量；总和重新计算，不信任传输层的值。
     pub fn accumulate(&mut self, other: &Self) {
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
         self.total_tokens = self.prompt_tokens + self.completion_tokens;
     }
 
-    /// True when the provider reported nothing.
+    /// 当提供方未报告任何值时为真。
     pub fn is_zero(&self) -> bool {
         self.total_tokens == 0
     }
@@ -489,25 +488,25 @@ impl std::ops::Add for TokenUsage {
     }
 }
 
-/// The outcome of one generation.
+/// 一次生成的结果。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GenerationResponse {
-    /// Assistant text, empty for a pure tool call.
+    /// 助手文本，纯工具调用时为空。
     pub content: String,
-    /// Calls to execute before the next turn.
+    /// 下一轮之前要执行的调用。
     pub tool_calls: Vec<ToolCall>,
-    /// Why generation stopped, when the provider said.
+    /// 生成停止的原因（若提供方指明了）。
     pub finish_reason: Option<FinishReason>,
-    /// Tokens charged for this call.
+    /// 此次调用计费的 token。
     pub usage: TokenUsage,
-    /// The model that actually answered, which may differ from the request.
+    /// 实际作答的模型，可能与请求中的不同。
     pub model: String,
-    /// Raw provider payload, kept for debugging and pass-through fields.
+    /// 原始提供方载荷，保留用于调试与透传字段。
     pub raw: Option<Value>,
 }
 
 impl GenerationResponse {
-    /// A finished text answer.
+    /// 一个已完成的文本答案。
     pub fn text(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
@@ -516,31 +515,31 @@ impl GenerationResponse {
         }
     }
 
-    /// Attach calls and mark the reason as `ToolCalls`.
+    /// 附上调用并将原因标记为 `ToolCalls`。
     pub fn with_tool_calls(mut self, calls: Vec<ToolCall>) -> Self {
         self.tool_calls = calls;
         self.finish_reason = Some(FinishReason::ToolCalls);
         self
     }
 
-    /// Set token accounting.
+    /// 设置 token 计量。
     pub fn with_usage(mut self, usage: TokenUsage) -> Self {
         self.usage = usage;
         self
     }
 
-    /// Record the model that answered.
+    /// 记录作答的模型。
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
     }
 
-    /// Whether the runtime must execute tools.
+    /// 运行时是否必须执行工具。
     pub fn calls_tools(&self) -> bool {
         !self.tool_calls.is_empty()
     }
 
-    /// The response re-encodable as the assistant turn of a conversation.
+    /// 可重新编码为对话中助手轮的响应。
     pub fn to_message(&self) -> ChatMessage {
         ChatMessage {
             role: Role::Assistant,
@@ -550,7 +549,7 @@ impl GenerationResponse {
         }
     }
 
-    /// Suggested next step for a ReAct loop.
+    /// 为 ReAct 循环建议的下一步。
     pub fn step(&self) -> GenerationStep {
         if self.calls_tools() {
             return GenerationStep::ExecuteTools;
@@ -564,48 +563,48 @@ impl GenerationResponse {
     }
 }
 
-/// What a ReAct loop should do with a response.
+/// ReAct 循环应如何处理一个响应。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GenerationStep {
-    /// Prose answer: end the turn.
+    /// 文本答案：结束本轮。
     Answer,
-    /// Tool calls pending: execute them and call the model again.
+    /// 有待执行的工具调用：执行它们并再次调用模型。
     ExecuteTools,
-    /// Cut off by the token budget.
+    /// 被 token 预算截断。
     Truncated,
-    /// Refused by the provider's safety filter.
+    /// 被提供方的安全过滤器拒绝。
     Blocked,
-    /// Cancelled by the runtime.
+    /// 被运行时取消。
     Aborted,
 }
 
 impl GenerationStep {
-    /// True only for [`GenerationStep::ExecuteTools`].
+    /// 仅对 [`GenerationStep::ExecuteTools`] 为真。
     pub fn needs_tools(self) -> bool {
         matches!(self, Self::ExecuteTools)
     }
 
-    /// True when the turn should end instead of looping.
+    /// 当本轮应结束而非循环时为真。
     pub fn is_terminal(self) -> bool {
         !matches!(self, Self::ExecuteTools)
     }
 }
 
-/// One incremental piece of a streamed generation.
+/// 流式生成的一个增量片段。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StreamChunk {
-    /// Text added since the previous chunk.
+    /// 自上一块以来新增的文本。
     pub text: String,
-    /// Calls completed in this chunk.
+    /// 本块中完成的调用。
     pub tool_calls: Vec<ToolCall>,
-    /// Set on the final chunk.
+    /// 在最后一块上设置。
     pub finish_reason: Option<FinishReason>,
-    /// Reported once, usually on the final chunk.
+    /// 只报告一次，通常在最后一块上。
     pub usage: Option<TokenUsage>,
 }
 
 impl StreamChunk {
-    /// A text-only chunk.
+    /// 一个纯文本块。
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -613,12 +612,12 @@ impl StreamChunk {
         }
     }
 
-    /// True for the terminal chunk.
+    /// 对终止块为真。
     pub fn is_last(&self) -> bool {
         self.finish_reason.is_some()
     }
 
-    /// Fold a stream into a single response, e.g. when a provider only streams.
+    /// 将流折叠为单个响应，例如提供方只支持流式时。
     pub fn reduce(chunks: impl IntoIterator<Item = Self>) -> GenerationResponse {
         let mut out = GenerationResponse::default();
         let mut calls: Vec<ToolCall> = Vec::new();

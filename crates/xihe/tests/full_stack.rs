@@ -1,7 +1,7 @@
-//! Cross-crate integration: the whole scheduled stack through the facade.
+//! 跨 crate 集成：通过门面运行整个被调度的栈。
 //!
-//! These tests use only `xihe::` imports, so they also guard that the facade
-//! re-exports everything needed to build a complete application.
+//! 这些测试只用 `xihe::` 导入，因此它们也守护门面重导出构建一个
+//! 完整应用所需的一切。
 
 use xihe::prelude::*;
 use xihe::{
@@ -167,9 +167,9 @@ async fn a_parallel_fan_out_replays_end_to_end_without_re_running_tools() {
     use xihe::llm::{GenerationRequest, GenerationResponse, LlmError, Provider, Role, ToolCall};
     use xihe::{FanOut, FanOutResult, FanOutTask, FnTool, Journal, ReplayProvider, ToolOutcome};
 
-    // Each agent ships once (a tool round) then answers, and the answer text
-    // depends on global call order. Re-running would change the answers and
-    // fire the side effect again; replay must reproduce both exactly.
+    // 每个智能体发布一次（一个工具轮）然后作答，且回答文本取决于
+    // 全局调用顺序。重新运行会改变回答并再次触发副作用；
+    // 回放必须精确复现两者。
     struct FanProvider {
         calls: Mutex<usize>,
     }

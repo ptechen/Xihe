@@ -1,9 +1,8 @@
-//! Assembling a Xihe application and driving it.
+//! 组装一个 Xihe 应用并驱动它。
 //!
-//! [`App`] owns the world, the schedule and the stop token. [`Plugin`]s add
-//! resources and systems without the caller having to know the order. [`Driver`]
-//! runs the schedule until every agent has settled, the frame budget runs out,
-//! or something asks the world to stop.
+//! [`App`] 拥有世界、调度器与停止令牌。[`Plugin`] 添加资源与系统，
+//! 而无需调用者知道顺序。[`Driver`] 运行调度器，直到每个智能体都已落定、
+//! 帧预算耗尽，或有东西要求世界停止。
 
 use std::collections::HashSet;
 use std::fmt::{self, Display, Formatter};
@@ -15,19 +14,19 @@ use xihe_core::World;
 use xihe_observer::Observer;
 use xihe_schedule::{Schedule, StopToken, System, SystemContext, SystemError, SystemSpec, Work, WorldHandle};
 
-/// Why the driver stopped.
+/// 驱动器为何停止。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StopReason {
-    /// No agent was still working.
+    /// 没有智能体仍在工作。
     Settled,
-    /// The frame budget was used up.
+    /// 帧预算被用尽。
     FrameBudget {
-        /// Frames that ran.
+        /// 运行了的帧数。
         frames: u64,
     },
-    /// Something called [`StopToken::stop`].
+    /// 有东西调用了 [`StopToken::stop`]。
     Stopped {
-        /// The reason that was given, when one was.
+        /// 给出的原因，若有。
         reason: String,
     },
 }
@@ -42,17 +41,17 @@ impl Display for StopReason {
     }
 }
 
-/// Something that adds resources or systems to an [`App`].
+/// 向 [`App`] 添加资源或系统之物。
 #[async_trait]
 pub trait Plugin: Send + Sync {
-    /// A short name for logs.
+    /// 日志中用的简短名字。
     fn name(&self) -> &str;
 
-    /// Mutate the app. Called once, in registration order, before the first frame.
+    /// 变更应用。在第一帧之前，按注册顺序调用一次。
     async fn install(&self, app: &mut App) -> Result<(), SystemError>;
 }
 
-/// The assembled application.
+/// 组装好的应用。
 pub struct App {
     world: World,
     schedule: Schedule,
@@ -61,7 +60,7 @@ pub struct App {
 }
 
 impl App {
-    /// An empty world and an empty schedule.
+    /// 一个空世界与一个空调度器。
     pub fn new() -> Self {
         Self {
             world: World::new(),
@@ -71,32 +70,32 @@ impl App {
         }
     }
 
-    /// The world, for seeding entities before the driver starts.
+    /// 世界，用于在驱动器启动前播下实体。
     pub fn world(&self) -> &World {
         &self.world
     }
 
-    /// The world, mutable.
+    /// 世界，可变。
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.world
     }
 
-    /// The schedule plugins append to.
+    /// 插件向其追加的调度器。
     pub fn schedule_mut(&mut self) -> &mut Schedule {
         &mut self.schedule
     }
 
-    /// The stop token the driver and systems share.
+    /// 驱动器与系统共享的停止令牌。
     pub fn stop_token(&self) -> &StopToken {
         &self.stop
     }
 
-    /// Plugins that have been installed, in order.
+    /// 已安装的插件，按顺序。
     pub fn installed(&self) -> &[String] {
         &self.installed
     }
 
-    /// Install `plugin`, recording its name.
+    /// 安装 `plugin`，记录其名字。
     pub async fn add<P: Plugin>(&mut self, plugin: P) -> Result<(), SystemError> {
         let name = plugin.name().to_string();
         plugin.install(self).await?;
@@ -104,19 +103,19 @@ impl App {
         Ok(())
     }
 
-    /// Insert a resource.
+    /// 插入一个资源。
     pub fn insert_resource<R: xihe_core::Resource>(&mut self, value: R) -> &mut Self {
         self.world.insert_resource(value);
         self
     }
 
-    /// Add a system to the schedule.
+    /// 向调度器添加一个系统。
     pub fn add_system(&mut self, spec: SystemSpec) -> &mut Self {
         self.schedule.add(spec);
         self
     }
 
-    /// Whether any system has reported outstanding work.
+    /// 是否有系统报告了未完成的工作量。
     pub fn busy(&self) -> bool {
         self.world
             .resource::<Work>()
@@ -124,12 +123,12 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Run until the world settles or `max_frames` elapse.
+    /// 运行直到世界落定或 `max_frames` 耗尽。
     pub async fn run(&mut self, max_frames: u64) -> Result<StopReason, SystemError> {
         Driver::new(max_frames).drive(self).await
     }
 
-    /// Take the world out, leaving an empty one behind.
+    /// 取出世界，留下一个空的。
     pub fn into_world(self) -> World {
         self.world
     }
@@ -151,14 +150,14 @@ impl fmt::Debug for App {
     }
 }
 
-/// Runs an [`App`]'s schedule frame by frame.
+/// 逐帧运行一个 [`App`] 的调度器。
 pub struct Driver {
     max_frames: u64,
     observe: bool,
 }
 
 impl Driver {
-    /// Stop after `max_frames`, or sooner when the world settles.
+    /// 在 `max_frames` 之后停止，或当世界落定时更早停止。
     pub fn new(max_frames: u64) -> Self {
         Self {
             max_frames: max_frames.max(1),
@@ -166,13 +165,13 @@ impl Driver {
         }
     }
 
-    /// Skip writing frames into the [`Observer`], for tests that assert on it.
+    /// 跳过把帧写入 [`Observer`]，供对其断言的测试使用。
     pub fn without_observation(mut self) -> Self {
         self.observe = false;
         self
     }
 
-    /// Drive `app` to a [`StopReason`].
+    /// 驱动 `app` 直到一个 [`StopReason`]。
     pub async fn drive(&self, app: &mut App) -> Result<StopReason, SystemError> {
         app.schedule
             .validate()
@@ -217,9 +216,9 @@ impl Driver {
             }
             if self.observe {
                 let elapsed = started.elapsed();
-                // Isolation contains a failure inside `execute`, which then
-                // returns Ok; surface each newly-failed system here so a
-                // contained failure is still visible in the log, once each.
+                // 隔离把失败容纳在 `execute` 内部，后者随后返回 Ok；
+                // 在此浮现每个新失败的系统，使一个被容纳的失败
+                // 仍在日志中可见，各一次。
                 let failed = app.schedule.failed_labels();
                 ctx.with_world_mut(|world| {
                     let observer = Observer::ensure(world);
@@ -257,7 +256,7 @@ async fn take_world(handle: &WorldHandle) -> World {
     std::mem::replace(&mut *guard, World::new())
 }
 
-/// Installs an empty tool registry when the world does not have one.
+/// 当世界没有工具注册表时安装一个空的。
 pub struct ToolsPlugin;
 
 #[async_trait]
@@ -274,13 +273,13 @@ impl Plugin for ToolsPlugin {
     }
 }
 
-/// Installs the ReAct system.
+/// 安装 ReAct 系统。
 pub struct ReactPlugin {
     steps: usize,
 }
 
 impl ReactPlugin {
-    /// A loop that runs up to `steps` rounds per frame.
+    /// 每帧至多运行 `steps` 轮的循环。
     pub fn new(steps: usize) -> Self {
         Self { steps }
     }
@@ -305,7 +304,7 @@ impl Plugin for ReactPlugin {
     }
 }
 
-/// Installs an empty observer.
+/// 安装一个空观察器。
 pub struct ObserverPlugin;
 
 #[async_trait]
@@ -322,13 +321,13 @@ impl Plugin for ObserverPlugin {
     }
 }
 
-/// Binds a chat client as the world's [`LlmService`].
+/// 把一个聊天客户端绑定为世界的 [`LlmService`]。
 pub struct LlmPlugin {
     service: LlmService,
 }
 
 impl LlmPlugin {
-    /// Use `service` for every agent that does not carry its own client.
+    /// 对每个不自带客户端的智能体使用 `service`。
     pub fn new(service: LlmService) -> Self {
         Self { service }
     }
@@ -346,15 +345,15 @@ impl Plugin for LlmPlugin {
     }
 }
 
-/// A system that stops the world once `frames` have elapsed.
+/// 一旦 `frames` 耗尽就停止世界的系统。
 ///
-/// Useful as a safety rail beside [`Driver::max_frames`].
+/// 作为 [`Driver::max_frames`] 旁的一道安全护栏很有用。
 pub struct FrameLimit {
     frames: u64,
 }
 
 impl FrameLimit {
-    /// Stop once the frame counter reaches `frames`.
+    /// 一旦帧计数器达到 `frames` 就停止。
     pub fn new(frames: u64) -> Self {
         Self { frames }
     }
@@ -563,8 +562,8 @@ mod tests {
         .expect("llm");
         app.add(ToolsPlugin).await.expect("tools");
         app.add(ReactPlugin::new(4)).await.expect("react");
-        // A peripheral system claims work, then dies. Isolation skips it forever
-        // after, so nobody else can clear its label: the driver must release it.
+        // 一个外围系统认领工作量，然后死掉。隔离此后永远跳过它，
+        // 因此没有别人能清除它的标签：驱动器必须释放它。
         app.add_system(SystemSpec::new(
             "ingest",
             system("ingest", |ctx: SystemContext| async move {
@@ -641,8 +640,8 @@ mod tests {
         );
     }
 
-    /// A provider that parks inside `generate` until released, so a test can
-    /// signal shutdown while a call is genuinely in flight.
+    /// 一个在 `generate` 内部挂起直到被释放的提供方，使测试能在
+    /// 一次调用真正在飞时发出关停信号。
     struct BlockingProvider {
         started: std::sync::Arc<tokio::sync::Notify>,
         release: std::sync::Arc<tokio::sync::Notify>,
@@ -686,8 +685,8 @@ mod tests {
         app.world_mut()
             .spawn_with((ReactAgent::new("scribe", "be brief").ask("hi"),));
 
-        // Stop once the agent is mid-generation, so React's own shutdown path
-        // (not the driver's top-of-frame check) is what fails the agent.
+        // 一旦智能体处于生成中途就停止，使 React 自己的关停路径
+        //（而非驱动器的帧顶检查）才是让智能体失败的那个。
         let stop = app.stop_token().clone();
         let signaller = tokio::spawn(async move {
             started.notified().await;

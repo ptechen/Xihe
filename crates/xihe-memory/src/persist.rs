@@ -1,18 +1,17 @@
-//! Snapshot and restore of a memory store: JSONL for durability, in-memory for
-//! tests.
+//! 记忆存储的快照与恢复：JSONL 用于持久，内存用于测试。
 //!
-//! Two shapes of persistence live here, because they answer different needs:
+//! 这里存在两种持久化形态，因为它们回答不同需求：
 //!
-//!   * [`save_snapshot`] / [`restore_snapshot`] write the whole store as one
-//!     JSON-lines file — the record of what a deployment knew at a point in
-//!     time, and the way to reopen it after a restart.
-//!   * [`append_journal`] adds records to the end of a file without reading it,
-//!     for a process that keeps writing while it runs.
+//!   * [`save_snapshot`] / [`restore_snapshot`] 把整个存储写为一个
+//!     JSON-lines 文件——某部署在某一时刻所知内容的记录，
+//!     也是重启后重新打开它的方式。
+//!   * [`append_journal`] 不读取文件就把记录追加到末尾，
+//!     供一个运行期间持续写入的进程使用。
 //!
-//! Records keep their ids on the way out and back in, so a restore does not
-//! renumber memories that other components already cite. Files are the plain
-//! text format (one [`MemoryRecord`] per line, no envelope): a truncated last
-//! line is reported as the tail of an interrupted write, not silently skipped.
+//! 记录在写出与读回时保持其 id，因此恢复不会重新编号
+//! 其他组件已引用的记忆。文件是纯文本格式（每行一个
+//! [`MemoryRecord`]，无信封）：被截断的最后一行会被报告为
+//! 一次中断写入的尾部，而非被静默跳过。
 
 use std::path::{Path, PathBuf};
 
@@ -23,49 +22,49 @@ use crate::error::{MemoryError, MemoryResult};
 use crate::record::MemoryRecord;
 use crate::store::MemoryStore;
 
-/// Where a memory file lives.
+/// 记忆文件所在之处。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryFile {
     path: PathBuf,
 }
 
 impl MemoryFile {
-    /// Point at a file that may or may not exist yet.
+    /// 指向一个可能尚不存在的文件。
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
-    /// The file this handle writes to and reads from.
+    /// 此句柄写入与读取的文件。
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Write every record in the store, replacing any previous snapshot.
+    /// 写出存储中的每条记录，替换任何先前的快照。
     pub async fn save(&self, store: &dyn MemoryStore) -> MemoryResult<usize> {
         save_snapshot(store, &self.path).await
     }
 
-    /// Insert every record in the file into the store.
+    /// 把文件中的每条记录插入存储。
     pub async fn restore(&self, store: &dyn MemoryStore) -> MemoryResult<usize> {
         restore_snapshot(store, &self.path).await
     }
 
-    /// Append records without reading the file first.
+    /// 追加记录，不先读取文件。
     pub async fn append(&self, records: &[MemoryRecord]) -> MemoryResult<usize> {
         append_journal(records, &self.path).await
     }
 
-    /// Read the file without touching a store.
+    /// 读取文件，不触碰存储。
     pub async fn read(&self) -> MemoryResult<Vec<MemoryRecord>> {
         read_records(&self.path).await
     }
 
-    /// Whether the file is present.
+    /// 文件是否存在。
     pub async fn exists(&self) -> bool {
         tokio::fs::try_exists(&self.path).await.unwrap_or(false)
     }
 
-    /// Remove the file; a missing file is not an error.
+    /// 删除文件；文件缺失不算错误。
     pub async fn delete(&self) -> MemoryResult<()> {
         match tokio::fs::remove_file(&self.path).await {
             Ok(()) => Ok(()),
@@ -75,7 +74,7 @@ impl MemoryFile {
     }
 }
 
-/// Write every record in the store to `path` as JSON lines.
+/// 把存储中的每条记录以 JSON lines 写到 `path`。
 pub async fn save_snapshot(store: &dyn MemoryStore, path: &Path) -> MemoryResult<usize> {
     let records = store.snapshot().await;
     let mut body = String::new();
@@ -87,7 +86,7 @@ pub async fn save_snapshot(store: &dyn MemoryStore, path: &Path) -> MemoryResult
     Ok(records.len())
 }
 
-/// Records already in the store are skipped; the rest are inserted.
+/// 已在存储中的记录被跳过；其余被插入。
 pub async fn restore_snapshot(store: &dyn MemoryStore, path: &Path) -> MemoryResult<usize> {
     let records = read_records(path).await?;
     let mut restored = 0;
@@ -101,7 +100,7 @@ pub async fn restore_snapshot(store: &dyn MemoryStore, path: &Path) -> MemoryRes
     Ok(restored)
 }
 
-/// Append records to `path`, creating it when missing.
+/// 把记录追加到 `path`，缺失时创建它。
 pub async fn append_journal(records: &[MemoryRecord], path: &Path) -> MemoryResult<usize> {
     if records.is_empty() {
         return Ok(0);
@@ -115,7 +114,7 @@ pub async fn append_journal(records: &[MemoryRecord], path: &Path) -> MemoryResu
     Ok(records.len())
 }
 
-/// Parse a JSON-lines memory file.
+/// 解析一个 JSON-lines 记忆文件。
 pub async fn read_records(path: &Path) -> MemoryResult<Vec<MemoryRecord>> {
     let file = tokio::fs::File::open(path)
         .await
@@ -182,7 +181,7 @@ async fn append_all(path: &Path, body: &[u8]) -> MemoryResult<()> {
         .map_err(MemoryError::persistence)
 }
 
-/// A unique path under the process temp directory, for tests and throwaway dumps.
+/// 进程临时目录下的一个唯一路径，用于测试与一次性转储。
 pub fn temp_path(label: &str) -> PathBuf {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

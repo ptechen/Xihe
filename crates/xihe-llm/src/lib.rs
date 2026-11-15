@@ -1,22 +1,20 @@
 //! # xihe-llm
 //!
-//! A provider-agnostic chat-completion layer for agent runtimes: a message and
-//! tool-call model, one async [`Provider`] trait, a [`ChatClient`] that owns the
-//! retry policy, and an offline [`MockProvider`] so agent logic is testable with
-//! no network.
+//! 面向智能体运行时、与提供方无关的聊天补全层：消息与工具调用模型、
+//! 一个异步 [`Provider`] trait、持有重试策略的 [`ChatClient`]，
+//! 以及离线的 [`MockProvider`]，使智能体逻辑无需网络即可测试。
 //!
-//! The crate deliberately knows nothing about entities or systems — it is plain
-//! data plus async calls, which is why [`xihe_agent`] can depend on it while
-//! staying independently testable.
+//! 本 crate 刻意不了解实体或系统——它只是纯数据加异步调用，
+//! 这正是 [`xihe_agent`] 能依赖它、同时保持可独立测试的原因。
 //!
-//! ## Offline by default
+//! ## 默认离线
 //!
 //! ```
 //! use xihe_llm::prelude::*;
 //!
 //! # #[tokio::main]
 //! async fn main() -> Result<(), LlmError> {
-//! // A scripted provider: two calls, the first asking for a tool.
+//! // 一个脚本化提供方：两次调用，第一次请求工具。
 //! let provider = MockProvider::with_script([
 //!     Reply::tool("lookup", serde_json::json!({ "city": "Hangzhou" })),
 //!     Reply::text("It is 21°C in Hangzhou."),
@@ -29,7 +27,7 @@
 //! assert_eq!(first.step(), GenerationStep::ExecuteTools);
 //! assert_eq!(first.tool_calls[0].string_argument("city"), Some("Hangzhou"));
 //!
-//! // Feed the tool result back exactly as a real provider would receive it.
+//! // 完全按真实提供方接收的方式把工具结果回传。
 //! let second = client
 //!     .generate(&GenerationRequest::new("")
 //!         .with_user("weather?")
@@ -42,10 +40,9 @@
 //! # }
 //! ```
 //!
-//! ## Streaming
+//! ## 流式
 //!
-//! Every provider can be streamed; a provider without native streaming emits
-//! one terminal chunk.
+//! 每个提供方都可流式读取；没有原生流式的提供方会发出一个终止块。
 //!
 //! ```
 //! use futures::StreamExt;
@@ -65,12 +62,12 @@
 //! # }
 //! ```
 //!
-//! ## Real providers
+//! ## 真实提供方
 //!
-//! Enable the `openai` feature to get [`OpenAiProvider`], which speaks the
-//! `/chat/completions` dialect shared by OpenAI, DashScope compatibility mode,
-//! Ollama, vLLM and LiteLLM. `OpenAiConfig::from_env()` reads `OPENAI_API_KEY`,
-//! `OPENAI_BASE_URL` and `XIHE_MODEL`.
+//! 启用 `openai` feature 即可获得 [`OpenAiProvider`]，它使用 OpenAI、
+//! DashScope 兼容模式、Ollama、vLLM 与 LiteLLM 共享的
+//! `/chat/completions` 方言。`OpenAiConfig::from_env()` 读取 `OPENAI_API_KEY`、
+//! `OPENAI_BASE_URL` 与 `XIHE_MODEL`。
 //!
 //! ```ignore
 //! let client = ChatClient::from_provider(OpenAiProvider::from_env()?);
@@ -102,13 +99,13 @@ pub mod openai;
 #[cfg(feature = "openai")]
 pub use openai::{OpenAiConfig, OpenAiProvider};
 
-/// Rough token count: providers average about four characters per token, and
-/// every message carries a little framing.
+/// 粗略的 token 计数：提供方平均每个 token 约四个字符，
+/// 且每条消息都带一点框架开销。
 pub fn estimate_tokens(chars: usize) -> usize {
     chars.div_ceil(4) + 4
 }
 
-/// Everything a caller usually needs.
+/// 调用者通常需要的一切。
 pub mod prelude {
     pub use super::{
         Capabilities, ChatClient, ChatMessage, DynProvider, Exhausted, FinishReason, GenerationParams,
@@ -133,7 +130,7 @@ mod tests {
 
     #[test]
     fn facade_types_are_object_safe() {
-        // Providers are handed around as `Arc<dyn Provider>` by the runtime.
+        // 提供方由运行时以 `Arc<dyn Provider>` 的形式传递。
         let provider: DynProvider = std::sync::Arc::new(MockProvider::text("ok"));
         assert_eq!(provider.id(), "mock");
         assert!(!provider.default_model().is_empty());

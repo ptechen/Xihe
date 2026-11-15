@@ -1,4 +1,4 @@
-//! A scripted, offline provider for tests, demos and deterministic replays.
+//! 一个脚本化的离线提供方，用于测试、演示与确定性回放。
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -15,31 +15,31 @@ use crate::message::{
 use crate::provider::{Capabilities, Provider};
 use crate::request::GenerationRequest;
 
-/// One scripted answer from [`MockProvider`].
+/// 来自 [`MockProvider`] 的一个脚本化答案。
 #[derive(Clone, Debug)]
 pub enum Reply {
-    /// Plain assistant text.
+    /// 纯助手文本。
     Text(String),
-    /// Assistant text plus the tool calls it wants executed.
+    /// 助手文本加上它希望执行的工具调用。
     Tools {
-        /// Assistant text accompanying the calls.
+        /// 伴随这些调用的助手文本。
         content: String,
-        /// The calls to execute.
+        /// 要执行的调用。
         calls: Vec<ToolCall>,
     },
-    /// A fully-specified response, for edge cases the helpers cannot express.
+    /// 一个完整指定的响应，用于辅助方法无法表达的边缘情形。
     Response(GenerationResponse),
-    /// Fail the call, e.g. to exercise the retry policy.
+    /// 让调用失败，例如用于演练重试策略。
     Fail(LlmError),
 }
 
 impl Reply {
-    /// A plain text reply.
+    /// 一个纯文本回复。
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text(text.into())
     }
 
-    /// A single tool call with no accompanying text.
+    /// 一个不带伴随文本的工具调用。
     pub fn tool(name: impl Into<String>, arguments: impl Into<Value>) -> Self {
         Self::Tools {
             content: String::new(),
@@ -47,7 +47,7 @@ impl Reply {
         }
     }
 
-    /// Several tool calls with no accompanying text.
+    /// 多个不带伴随文本的工具调用。
     pub fn tools(calls: Vec<ToolCall>) -> Self {
         Self::Tools {
             content: String::new(),
@@ -55,12 +55,12 @@ impl Reply {
         }
     }
 
-    /// An injected failure.
+    /// 一个注入的失败。
     pub fn fail(error: LlmError) -> Self {
         Self::Fail(error)
     }
 
-    /// The assistant message this reply would produce.
+    /// 此回复将产出的助手消息。
     pub fn response(&self) -> Option<GenerationResponse> {
         match self {
             Self::Text(text) => Some(GenerationResponse::text(text.clone())),
@@ -73,14 +73,14 @@ impl Reply {
     }
 }
 
-/// How a mock behaves once its script runs out.
+/// 脚本耗尽后模拟提供方的行为。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exhausted {
-    /// Keep answering with the last scripted reply, so long runs terminate.
+    /// 持续用最后一个脚本回复作答，使长运行能终止。
     RepeatLast,
-    /// Replay the script from the beginning, for cadence and loop tests.
+    /// 从头回放脚本，用于节奏与循环测试。
     Cycle,
-    /// Fail with [`LlmError::Config`], so a test notices extra calls.
+    /// 以 [`LlmError::Config`] 失败，使测试能察觉多余的调用。
     Fail,
 }
 
@@ -94,10 +94,10 @@ struct MockState {
     last: Option<Reply>,
 }
 
-/// A deterministic provider that answers from a script and records requests.
+/// 一个确定性提供方，从脚本作答并记录请求。
 ///
-/// Cloning shares the script and the log, so an `Arc<MockProvider>` handed to one
-/// system and inspected from another sees the same state.
+/// 克隆会共享脚本与日志，因此交给一个系统、又从另一个系统查看的
+/// `Arc<MockProvider>` 看到的是同一份状态。
 #[derive(Clone, Debug)]
 pub struct MockProvider {
     state: Arc<Mutex<MockState>>,
@@ -114,12 +114,12 @@ impl Default for MockProvider {
 }
 
 impl MockProvider {
-    /// A mock with an empty script.
+    /// 一个带空脚本的模拟提供方。
     pub fn new() -> Self {
         Self::with_script(Vec::new())
     }
 
-    /// Answers taken in order; once consumed, [`MockProvider::exhausted`] decides.
+    /// 按顺序取用的答案；一旦耗尽，由 [`MockProvider::exhausted`] 决定。
     pub fn with_script(script: impl IntoIterator<Item = Reply>) -> Self {
         Self {
             state: Arc::new(Mutex::new(MockState {
@@ -137,18 +137,18 @@ impl MockProvider {
         }
     }
 
-    /// A one-shot mock returning `text`.
+    /// 返回 `text` 的一次性模拟提供方。
     pub fn text(text: impl Into<String>) -> Self {
         Self::with_script([Reply::text(text)])
     }
 
-    /// A mock that always answers with the same text, however often it is called.
+    /// 无论被调用多少次都总是以相同文本作答的模拟提供方。
     pub fn echo(text: impl Into<String>) -> Self {
         Self::with_script([Reply::text(text)]).with_exhausted(Exhausted::Cycle)
     }
 
-    /// A mock that asks for `tool` with `arguments` on the first call and then
-    /// answers with `final_text` — the shape most ReAct tests need.
+    /// 第一次调用时以 `arguments` 请求 `tool`、随后以 `final_text`
+    /// 作答的模拟提供方——大多数 ReAct 测试所需的形态。
     pub fn tool_then_answer(
         tool: impl Into<String>,
         args: impl Into<Value>,
@@ -157,7 +157,7 @@ impl MockProvider {
         Self::with_script([Reply::tool(tool, args), Reply::text(final_text)])
     }
 
-    /// A mock that fails `failures_before` times and then succeeds.
+    /// 先失败 `failures_before` 次然后成功的模拟提供方。
     pub fn flaky(failures_before: u32, message: impl Into<String>) -> Self {
         let message = message.into();
         let script = std::iter::repeat_n(
@@ -168,61 +168,61 @@ impl MockProvider {
         Self::with_script(script).with_exhausted(Exhausted::Cycle)
     }
 
-    /// Override the advertised default model name.
+    /// 覆盖所宣称的默认模型名。
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
     }
 
-    /// Artificial delay per call, for timeout and concurrency tests.
+    /// 每次调用的人为延迟，用于超时与并发测试。
     pub fn with_latency(mut self, latency: Duration) -> Self {
         self.latency = latency;
         self
     }
 
-    /// Choose what happens once the script runs out.
+    /// 选择脚本耗尽后发生什么。
     pub fn with_exhausted(mut self, behaviour: Exhausted) -> Self {
         self.exhausted = behaviour;
         self
     }
 
-    /// The reply used when the script is empty and `exhausted` is `RepeatLast`.
+    /// 当脚本为空且 `exhausted` 为 `RepeatLast` 时使用的回复。
     pub fn with_fallback(mut self, reply: Reply) -> Self {
         self.fallback = reply;
         self
     }
 
-    /// Append a reply to the end of the script.
+    /// 向脚本末尾追加一个回复。
     pub fn push(&self, reply: Reply) {
         self.lock().script.push_back(reply);
     }
 
-    /// The per-call delay.
+    /// 每次调用的延迟。
     pub fn latency(&self) -> Duration {
         self.latency
     }
 
-    /// Every request received so far, oldest first.
+    /// 迄今收到的每个请求，最旧的在前。
     pub fn requests(&self) -> Vec<GenerationRequest> {
         self.lock().requests.clone()
     }
 
-    /// The most recent request, if any.
+    /// 最近的请求（若有）。
     pub fn last_request(&self) -> Option<GenerationRequest> {
         self.lock().requests.last().cloned()
     }
 
-    /// Total requests received, failures included.
+    /// 收到的请求总数，包含失败。
     pub fn call_count(&self) -> usize {
         self.lock().requests.len()
     }
 
-    /// How many calls were answered with an injected error.
+    /// 有多少次调用以注入的错误作答。
     pub fn failure_count(&self) -> usize {
         self.lock().failures
     }
 
-    /// The conversation the mock has been asked about, flattened for assertions.
+    /// 模拟提供方被问到的对话，展平以便断言。
     pub fn transcript(&self) -> Vec<ChatMessage> {
         self.lock()
             .requests
@@ -231,7 +231,7 @@ impl MockProvider {
             .unwrap_or_default()
     }
 
-    /// Drop the script and the recorded history.
+    /// 丢弃脚本与记录的历史。
     pub fn reset(&self) {
         let mut state = self.lock();
         state.script.clear();
@@ -243,11 +243,11 @@ impl MockProvider {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, MockState> {
-        // The guard is never held across an await point; see `pick` and `record`.
+        // 守卫绝不跨越 await 点持有；参见 `pick` 与 `record`。
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Take the next scripted reply without holding the lock across the sleep.
+    /// 取下一个脚本回复，且不在睡眠期间持有锁。
     fn pick(&self) -> (Reply, Option<u64>) {
         let mut state = self.lock();
         let reply = match state.script.pop_front() {
@@ -260,7 +260,7 @@ impl MockProvider {
             }
             None => match self.exhausted {
                 Exhausted::Fail => {
-                    // `record` counts the failure; here we only pick the reply.
+                    // `record` 统计失败；这里只挑选回复。
                     return (Reply::Fail(LlmError::config("mock script exhausted")), None);
                 }
                 Exhausted::RepeatLast => state
@@ -285,7 +285,7 @@ impl MockProvider {
         }
     }
 
-    /// Fill in ids, usage and the model name so replies look provider-shaped.
+    /// 填入 id、用量与模型名，使回复看起来像提供方产出的。
     fn hydrate(
         &self,
         reply: GenerationResponse,

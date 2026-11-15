@@ -1,15 +1,14 @@
-//! Memory, wired into the agent loop.
+//! 记忆，接入智能体循环。
 //!
-//! Three things connect [`xihe_memory`] to an agent, and this module holds all
-//! of them:
+//! 三件事把 [`xihe_memory`] 连到一个智能体，本模块持有全部：
 //!
-//! - [`MemoryService`] — the shared store as a world resource, so tools and the
-//!   loop can reach it by type. [`crate::React`] passes it to every tool call as
-//!   [`ToolContext::with_store`](crate::ToolContext::with_store).
-//! - [`ChatSummariser`] — a [`Summariser`] that asks the model instead of
-//!   picking sentences, used when folding a long conversation.
-//! - [`recall_context`] — what the agent knows about a topic, rendered as one
-//!   system message the loop can put in front of the model.
+//! - [`MemoryService`]——作为世界资源的共享存储，使工具与循环
+//!   能按类型触及它。[`crate::React`] 把它作为
+//!   [`ToolContext::with_store`](crate::ToolContext::with_store) 传给每次工具调用。
+//! - [`ChatSummariser`]——一个询问模型而非挑选句子的 [`Summariser`]，
+//!   在折叠长对话时使用。
+//! - [`recall_context`]——智能体关于某主题已知之事，渲染为循环
+//!   可置于模型面前的一条系统消息。
 
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
@@ -25,53 +24,53 @@ use xihe_schedule::SystemContext;
 
 use crate::replay::Journal;
 
-/// The shared memory store, kept in the world so systems find it by type.
+/// 共享记忆存储，保留在世界中，使系统按类型找到它。
 #[derive(Clone)]
 pub struct MemoryService(Arc<dyn MemoryStore>);
 
 impl MemoryService {
-    /// Wrap a store the caller already owns.
+    /// 包装调用者已拥有的一个存储。
     pub fn new<S: MemoryStore + 'static>(store: S) -> Self {
         Self(Arc::new(store))
     }
 
-    /// Wrap a store behind an `Arc`, e.g. one shared with non-ECS code.
+    /// 把存储包装在 `Arc` 之后，例如与非 ECS 代码共享的那个。
     pub fn from_arc(store: Arc<dyn MemoryStore>) -> Self {
         Self(store)
     }
 
-    /// The store behind the shared handle.
+    /// 共享句柄背后的存储。
     pub fn store(&self) -> &Arc<dyn MemoryStore> {
         &self.0
     }
 
-    /// A second handle to the same store.
+    /// 指向同一存储的第二个句柄。
     pub fn shared(&self) -> Arc<dyn MemoryStore> {
         Arc::clone(&self.0)
     }
 
-    /// The store's own identifier, e.g. `in-memory`.
+    /// 存储自己的标识符，例如 `in-memory`。
     pub fn id(&self) -> String {
         self.0.id().to_string()
     }
 
-    /// Put the service in the world, returning any previous one.
+    /// 把服务放入世界，返回先前的那个（若有）。
     pub fn install(&self, world: &mut World) -> Option<Self> {
         world.insert_resource(self.clone())
     }
 
-    /// Read the service out of a locked world.
+    /// 从已加锁的世界中读出服务。
     pub fn from_world(world: &World) -> Option<Self> {
         world.resource::<Self>().cloned()
     }
 
-    /// Read the service through a system context.
+    /// 通过系统上下文读取服务。
     pub async fn read(ctx: &SystemContext) -> Option<Self> {
         ctx.read_resource(|world| world.and_then(Self::from_world))
             .await
     }
 
-    /// An agent-scoped working memory view over this store.
+    /// 此存储之上、限定到某智能体的工作记忆视图。
     pub fn working_memory(&self, owner: Entity) -> AgentMemory {
         AgentMemory::new(self.shared(), owner)
     }
@@ -85,12 +84,11 @@ impl Debug for MemoryService {
     }
 }
 
-/// Fold a conversation with a real summariser.
+/// 用一个真正的摘要器折叠对话。
 ///
-/// [`ConversationWindow::fold`] needs `&mut` access to the window and awaits the
-/// summariser, so it cannot run while the world lock is held. Callers that fold
-/// — a between-tasks cleanup, a demo, a test — do it through here, on a window
-/// they own.
+/// [`ConversationWindow::fold`] 需要对窗口的 `&mut` 访问并 await
+/// 摘要器，因此它不能在持有世界锁时运行。进行折叠的调用者——
+/// 任务间清理、demo、测试——通过这里、在它们拥有的窗口上做。
 pub async fn fold_window<S: Summariser + ?Sized>(
     window: &mut ConversationWindow,
     summariser: &S,
@@ -99,17 +97,16 @@ pub async fn fold_window<S: Summariser + ?Sized>(
     window.fold(summariser, keep_last).await
 }
 
-/// Summarise with a chat model.
+/// 用一个聊天模型做摘要。
 ///
-/// The heuristic summariser in [`xihe_memory`] picks sentences it can score;
-/// this one asks the model, which is better at keeping the parts of a
-/// conversation that matter to the task. When the call fails, it falls back to
-/// the heuristic rather than dropping the fold, because a window that cannot be
-/// folded grows without bound.
+/// [`xihe_memory`] 中的启发式摘要器挑选它能打分的句子；
+/// 这一个询问模型，后者更擅长保留对话中对任务重要的部分。
+/// 当调用失败时，它回退到启发式而非丢弃折叠，因为无法折叠的
+/// 窗口会无界增长。
 ///
-/// Given a [`Journal`] and a correlation, the summarising call is recorded and
-/// replayed like any other model call: a replay feeds back the recorded summary
-/// instead of asking the model again, so a folded run reproduces turn for turn.
+/// 给定一个 [`Journal`] 与一个关联标识，摘要调用像任何其他模型
+/// 调用一样被录制与回放：回放反馈录制的摘要而非再次询问模型，
+/// 因此一次折叠的运行能逐轮复现。
 pub struct ChatSummariser {
     client: Arc<ChatClient>,
     fallback: Box<dyn Summariser>,
@@ -120,7 +117,7 @@ pub struct ChatSummariser {
 }
 
 impl ChatSummariser {
-    /// Ask `client` to compress transcripts.
+    /// 请 `client` 压缩转录。
     pub fn new(client: Arc<ChatClient>) -> Self {
         Self {
             client,
@@ -135,36 +132,36 @@ impl ChatSummariser {
         }
     }
 
-    /// Cap the summary length.
+    /// 限制摘要长度。
     #[must_use]
     pub fn with_max_chars(mut self, max_chars: usize) -> Self {
         self.max_chars = max_chars.max(32);
         self
     }
 
-    /// Replace the instruction that frames the summarising request.
+    /// 替换框定摘要请求的指令。
     #[must_use]
     pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
         self.instructions = instructions.into();
         self
     }
 
-    /// Record and replay the summarising call through `journal`.
+    /// 通过 `journal` 录制与回放摘要调用。
     #[must_use]
     pub fn with_journal(mut self, journal: Journal) -> Self {
         self.journal = Some(journal);
         self
     }
 
-    /// Tag the summarising call with the agent and fold index that raised it,
-    /// so two agents folding identical transcripts keep separate journal keys.
+    /// 用发起它的智能体与折叠索引标记摘要调用，
+    /// 使折叠相同转录的两个智能体保持独立的日志键。
     #[must_use]
     pub fn with_correlation(mut self, agent: impl Into<String>, fold: usize) -> Self {
         self.correlation = Some((agent.into(), fold));
         self
     }
 
-    /// The model this summariser asks.
+    /// 此摘要器询问的模型。
     pub fn model(&self) -> String {
         self.client.model().to_string()
     }
@@ -183,8 +180,8 @@ impl Summariser for ChatSummariser {
         if let Some((agent, fold)) = &self.correlation {
             request = request.with_correlation(format!("{agent}::fold"), *fold);
         }
-        // A recorded summary is fed back verbatim; only a miss asks the model,
-        // and a successful call is journaled so the next replay finds it.
+        // 录制的摘要被逐字反馈；只有未命中才询问模型，
+        // 成功的调用被记入日志，使下一次回放能找到它。
         let response = if let Some(journal) = &self.journal
             && let Some(recorded) = journal.lookup(&request)
         {
@@ -218,11 +215,10 @@ impl Summariser for ChatSummariser {
     }
 }
 
-/// Recall what the store knows about `query`, as lines the model can read.
+/// 召回存储关于 `query` 已知之事，作为模型可读的行。
 ///
-/// Records are quoted with their kind so the model can tell a fact from a
-/// half-remembered reflection, and the whole block is one message rather than
-/// `top_k` of them — a system turn costs less than `top_k` turns.
+/// 记录连同其类别被引用，使模型能区分事实与半记得的反思，
+/// 整块是一条消息而非 `top_k` 条——一个系统轮比 `top_k` 个轮更省。
 pub async fn recall_lines(
     store: &Arc<dyn MemoryStore>,
     query: &str,
@@ -241,7 +237,7 @@ pub async fn recall_lines(
         .collect())
 }
 
-/// Build the "what you already know" system message, or `None` when nothing matched.
+/// 构建“你已知之事”系统消息，无匹配时为 `None`。
 pub async fn recall_context(
     store: &Arc<dyn MemoryStore>,
     query: &str,

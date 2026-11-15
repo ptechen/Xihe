@@ -1,15 +1,14 @@
-//! Multi-agent patterns on top of the ReAct loop.
+//! ReAct 循环之上的多智能体模式。
 //!
-//! An orchestrator does not call a model itself. It writes tasks onto agent
-//! entities and reads their answers back, so the same [`xihe_agent::React`]
-//! system that runs one agent runs a team. The patterns here are the bookkeeping
-//! for that:
+//! 编排器自己不调用模型。它把任务写到智能体实体上并读回它们的回答，
+//! 因此运行单个智能体的同一个 [`xihe_agent::React`] 系统也运行一个团队。
+//! 这里的模式就是为此所做的簿记：
 //!
-//! - [`Handoff`] — one agent finishes, another starts with its answer.
-//! - [`Router`] — pick the agent whose description matches the task.
-//! - [`Supervisor`] — a parent assigns work and collects results.
-//! - [`Blackboard`] — a shared resource agents read and write between turns.
-//! - [`FanOut`] — the same task to several agents, reduced to one answer.
+//! - [`Handoff`] —— 一个智能体完成，另一个以它的回答开始。
+//! - [`Router`] —— 挑选描述与任务匹配的智能体。
+//! - [`Supervisor`] —— 一个父级分派工作并收集结果。
+//! - [`Blackboard`] —— 一个共享资源，智能体在轮之间读写它。
+//! - [`FanOut`] —— 同一任务发给若干智能体，归约为一个回答。
 
 use std::fmt::{self, Display, Formatter};
 
@@ -19,45 +18,45 @@ use xihe_core::{Entity, World};
 use xihe_observer::{EventKind, Observer};
 use xihe_schedule::{Access, System, SysResult, SystemContext, SystemError, Work};
 
-/// Why an orchestration step could not run.
+/// 一个编排步骤为何无法运行。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OrchestratorError {
-    /// The named agent is not in the roster.
+    /// 被点名的智能体不在名册中。
     UnknownAgent {
-        /// The name that was asked for.
+        /// 被请求的名字。
         name: String,
     },
-    /// A hand-off pointed at an entity that is gone.
+    /// 一次交接指向了一个已消失的实体。
     MissingEntity {
-        /// The entity that was expected.
+        /// 被期望的实体。
         entity: Entity,
     },
-    /// The roster has nobody to route to.
+    /// 名册中无人可路由。
     EmptyRoster,
-    /// A reduce step ran before every branch finished.
+    /// 一个归约步骤在每个分支完成之前就运行了。
     Incomplete {
-        /// How many branches have an answer.
+        /// 有多少分支已有回答。
         finished: usize,
-        /// How many were started.
+        /// 启动了多少分支。
         expected: usize,
     },
-    /// A branch failed, so the team can never fully finish.
+    /// 一个分支失败了，因此团队永远无法完全完成。
     BranchFailed {
-        /// The branch that failed.
+        /// 失败的分支。
         name: String,
-        /// What the agent reported.
+        /// 智能体报告了什么。
         error: String,
     },
-    /// A hand-off was applied before its source agent finished.
+    /// 一次交接在其源智能体完成之前就被应用了。
     SourceNotFinished {
-        /// The source agent that has no answer yet.
+        /// 尚无回答的源智能体。
         name: String,
-        /// Its current status.
+        /// 它当前的状态。
         status: AgentStatus,
     },
-    /// No override fired and no description overlapped the task.
+    /// 没有覆盖规则触发，也没有描述与任务重叠。
     NoMatch {
-        /// The task that could not be routed.
+        /// 无法被路由的任务。
         task: String,
     },
 }
@@ -84,19 +83,19 @@ impl Display for OrchestratorError {
 
 impl std::error::Error for OrchestratorError {}
 
-/// One agent an orchestrator can address.
+/// 编排器可寻址的一个智能体。
 #[derive(Clone, Debug)]
 pub struct RosterEntry {
-    /// Stable name used in routes and hand-offs.
+    /// 在路由与交接中使用的稳定名字。
     pub name: String,
-    /// What this agent is for, used by the router.
+    /// 此智能体用途为何，供路由器使用。
     pub description: String,
-    /// The entity carrying the [`ReactAgent`].
+    /// 承载 [`ReactAgent`] 的实体。
     pub entity: Entity,
 }
 
 impl RosterEntry {
-    /// An entry for an agent that already exists.
+    /// 为一个已存在的智能体建条目。
     pub fn new(name: impl Into<String>, description: impl Into<String>, entity: Entity) -> Self {
         Self {
             name: name.into(),
@@ -106,19 +105,19 @@ impl RosterEntry {
     }
 }
 
-/// The agents a pattern may address.
+/// 一个模式可寻址的那些智能体。
 #[derive(Clone, Debug, Default)]
 pub struct Roster {
     entries: Vec<RosterEntry>,
 }
 
 impl Roster {
-    /// An empty roster.
+    /// 一个空名册。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Add an agent.
+    /// 添加一个智能体。
     pub fn add(&mut self, entry: RosterEntry) -> &mut Self {
         if let Some(existing) = self.entries.iter_mut().find(|item| item.name == entry.name) {
             *existing = entry;
@@ -128,7 +127,7 @@ impl Roster {
         self
     }
 
-    /// Spawn `agent` into `world` and register it under `description`.
+    /// 把 `agent` 生成到 `world` 中，并以 `description` 注册它。
     pub fn spawn(
         &mut self,
         world: &mut World,
@@ -141,45 +140,45 @@ impl Roster {
         entity
     }
 
-    /// Every entry, in registration order.
+    /// 每个条目，按注册顺序。
     pub fn entries(&self) -> &[RosterEntry] {
         &self.entries
     }
 
-    /// How many agents are registered.
+    /// 注册了多少智能体。
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether nobody is registered.
+    /// 是否无人注册。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// The entry named `name`.
+    /// 名为 `name` 的条目。
     pub fn get(&self, name: &str) -> Option<&RosterEntry> {
         self.entries.iter().find(|entry| entry.name == name)
     }
 
-    /// Names, in registration order.
+    /// 名字，按注册顺序。
     pub fn names(&self) -> Vec<&str> {
         self.entries.iter().map(|entry| entry.name.as_str()).collect()
     }
 }
 
-/// Pass one agent's answer to another as a new question.
+/// 把一个智能体的回答作为新问题传给另一个。
 #[derive(Clone, Debug)]
 pub struct Handoff {
-    /// Who produced the answer.
+    /// 谁产出了回答。
     pub from: String,
-    /// Who should continue.
+    /// 谁应继续。
     pub to: String,
-    /// Text put in front of the answer, so the next agent knows why it arrived.
+    /// 置于回答之前的文本，使下一个智能体知道它为何到来。
     pub preface: String,
 }
 
 impl Handoff {
-    /// Hand `from`'s answer to `to`, introduced by `preface`.
+    /// 把 `from` 的回答交给 `to`，以 `preface` 引入。
     pub fn new(from: impl Into<String>, to: impl Into<String>, preface: impl Into<String>) -> Self {
         Self {
             from: from.into(),
@@ -188,12 +187,11 @@ impl Handoff {
         }
     }
 
-    /// Write the hand-off into the world.
+    /// 把交接写入世界。
     ///
-    /// Returns the question that was queued, so a caller can log it. The source
-    /// agent must already be [`AgentStatus::Finished`]; otherwise this returns
-    /// [`OrchestratorError::SourceNotFinished`] rather than handing off an empty
-    /// answer.
+    /// 返回被排队的问题，使调用者能记录它。源智能体必须已是
+    /// [`AgentStatus::Finished`]；否则这返回
+    /// [`OrchestratorError::SourceNotFinished`]，而非交接一个空回答。
     pub fn apply(&self, world: &mut World, roster: &Roster) -> Result<String, OrchestratorError> {
         let from = roster
             .get(&self.from)
@@ -230,33 +228,33 @@ impl Handoff {
     }
 }
 
-/// Pick an agent by matching the task against descriptions.
+/// 通过把任务与描述匹配来挑选一个智能体。
 ///
-/// Matching is lexical on purpose: a router that needs a model can ask one, but
-/// the default must work with the mock provider and must be explainable.
+/// 匹配刻意是词法的：需要模型的路由器可以去问一个，但默认必须
+/// 能与模拟提供方一起工作，且必须可解释。
 #[derive(Clone, Debug, Default)]
 pub struct Router {
-    /// Words that, when present, force a named agent. Checked before scoring.
+    /// 出现时即强制某个被点名智能体的词。在打分之前检查。
     overrides: Vec<(String, String)>,
 }
 
 impl Router {
-    /// A router with no forced routes.
+    /// 一个没有强制路由的路由器。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// When `needle` appears in the task, always choose `agent`.
+    /// 当 `needle` 出现在任务中时，总是选择 `agent`。
     pub fn when_contains(mut self, needle: impl Into<String>, agent: impl Into<String>) -> Self {
         self.overrides.push((needle.into(), agent.into()));
         self
     }
 
-    /// The agent this task should go to, and why.
+    /// 此任务应去往的智能体，以及为何。
     ///
-    /// An override wins first; otherwise the description with the most word
-    /// overlap is chosen. When nothing overlaps and no override fires this
-    /// returns [`OrchestratorError::NoMatch`] rather than guessing an agent.
+    /// 覆盖规则优先胜出；否则选择词重叠最多的描述。当没有任何重叠
+    /// 且没有覆盖规则触发时，这返回 [`OrchestratorError::NoMatch`]，
+    /// 而非猜测一个智能体。
     pub fn route<'a>(
         &self,
         task: &str,
@@ -290,7 +288,7 @@ impl Router {
         Ok((entry, format!("description overlap {score}")))
     }
 
-    /// Queue `task` on the chosen agent.
+    /// 把 `task` 排队到被选中的智能体上。
     pub fn dispatch(
         &self,
         world: &mut World,
@@ -308,17 +306,17 @@ impl Router {
     }
 }
 
-/// A parent that assigns work and reads the answers back.
+/// 一个分派工作并读回回答的父级。
 #[derive(Clone, Debug)]
 pub struct Supervisor {
-    /// The supervising agent's name.
+    /// 监督智能体的名字。
     pub name: String,
-    /// Agents it may assign to.
+    /// 它可分派到的智能体。
     roster: Roster,
 }
 
 impl Supervisor {
-    /// A supervisor over `roster`.
+    /// 一个管理 `roster` 的监督者。
     pub fn new(name: impl Into<String>, roster: Roster) -> Self {
         Self {
             name: name.into(),
@@ -326,12 +324,12 @@ impl Supervisor {
         }
     }
 
-    /// The agents this supervisor may assign.
+    /// 此监督者可分派的那些智能体。
     pub fn roster(&self) -> &Roster {
         &self.roster
     }
 
-    /// Queue `task` on `agent`.
+    /// 把 `task` 排队到 `agent` 上。
     pub fn assign(
         &self,
         world: &mut World,
@@ -353,7 +351,7 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Answers from agents that have finished, as `(name, answer)`.
+    /// 来自已完成智能体的回答，形如 `(name, answer)`。
     pub fn collect(&self, world: &World) -> Vec<(String, String)> {
         self.roster
             .entries()
@@ -368,7 +366,7 @@ impl Supervisor {
             .collect()
     }
 
-    /// Whether every assigned agent has reached a terminal status.
+    /// 是否每个被分派的智能体都已到达终态。
     pub fn settled(&self, world: &World) -> bool {
         self.roster.entries().iter().all(|entry| {
             world
@@ -378,41 +376,40 @@ impl Supervisor {
     }
 }
 
-/// A shared note any agent can read or append.
+/// 任何智能体都可读取或追加的共享备注。
 ///
-/// Stored as a world resource, so tools and systems reach it by type without
-/// knowing which entity wrote it. The retained notes can be bounded with
-/// [`Blackboard::with_retention`] so a long-running world does not accumulate
-/// notes without limit.
+/// 作为世界资源存储，因此工具与系统按类型触及它，而无需知道是哪个
+/// 实体写的。保留的备注可用 [`Blackboard::with_retention`] 加以限定，
+/// 使一个长期运行的世界不会无限制地累积备注。
 #[derive(Clone, Debug, Default)]
 pub struct Blackboard {
     notes: Vec<Note>,
     retention: usize,
 }
 
-/// One line on a [`Blackboard`].
+/// [`Blackboard`] 上的一行。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
-    /// Who wrote it.
+    /// 谁写的。
     pub author: String,
-    /// What they wrote.
+    /// 写了什么。
     pub text: String,
 }
 
 impl Blackboard {
-    /// An empty board.
+    /// 一个空黑板。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Keep at most `limit` recent notes; `0` (the default) means unlimited.
-    /// Older notes are dropped as new ones are posted.
+    /// 至多保留 `limit` 条最近备注；`0`（默认）表示无限制。
+    /// 随着新备注被张贴，更旧的备注被丢弃。
     pub fn with_retention(mut self, limit: usize) -> Self {
         self.retention = limit;
         self
     }
 
-    /// Append a note.
+    /// 追加一条备注。
     pub fn post(&mut self, author: impl Into<String>, text: impl Into<String>) -> &mut Self {
         self.notes.push(Note {
             author: author.into(),
@@ -425,17 +422,17 @@ impl Blackboard {
         self
     }
 
-    /// Every note, oldest first.
+    /// 每条备注，最旧的在前。
     pub fn notes(&self) -> &[Note] {
         &self.notes
     }
 
-    /// Notes written by `author`.
+    /// 由 `author` 写的备注。
     pub fn by(&self, author: &str) -> Vec<&Note> {
         self.notes.iter().filter(|note| note.author == author).collect()
     }
 
-    /// The board as lines a model can read.
+    /// 黑板按模型可读的行呈现。
     pub fn render(&self) -> String {
         if self.notes.is_empty() {
             return "the blackboard is empty".to_string();
@@ -447,42 +444,42 @@ impl Blackboard {
             .join("\n")
     }
 
-    /// How many notes are posted.
+    /// 张贴了多少备注。
     pub fn len(&self) -> usize {
         self.notes.len()
     }
 
-    /// Whether nothing has been posted.
+    /// 是否尚未张贴任何内容。
     pub fn is_empty(&self) -> bool {
         self.notes.is_empty()
     }
 }
 
-/// The same task sent to several agents, then folded into one answer.
+/// 同一任务发给若干智能体，然后折叠为一个回答。
 #[derive(Clone, Debug)]
 pub struct FanOut {
-    /// Agents that each get the task.
+    /// 各自得到该任务的智能体。
     pub agents: Vec<String>,
-    /// How their answers are combined.
+    /// 它们的回答如何被组合。
     pub reduce: Reduce,
 }
 
-/// How fan-out answers become one.
+/// 扇出的回答如何成为一个。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Reduce {
-    /// Join every answer, labelled by agent. Needs every branch to finish; a
-    /// failed branch aborts the reduction.
+    /// 连接每个回答，按智能体标注。需要每个分支都完成；
+    /// 一个失败的分支会中止归约。
     #[default]
     Concat,
-    /// Keep the longest finished answer. Waits for every branch to settle, but
-    /// drops failed branches instead of waiting on or aborting over them.
+    /// 保留最长的已完成回答。等待每个分支落定，但丢弃失败的分支，
+    /// 而非等待它们或因它们而中止。
     Longest,
-    /// Keep the first roster branch's answer. Needs only that branch; slow or
-    /// failed siblings are irrelevant.
+    /// 保留名册中第一个分支的回答。只需要那一个分支；
+    /// 缓慢或失败的兄弟分支无关紧要。
     First,
 }
 
-/// One branch's state, snapshotted for a reduction.
+/// 一个分支的状态，为一次归约而快照。
 struct Branch {
     name: String,
     status: AgentStatus,
@@ -491,7 +488,7 @@ struct Branch {
 }
 
 impl FanOut {
-    /// Send `agents` the same task and combine with [`Reduce::Concat`].
+    /// 给 `agents` 发送同一任务，并以 [`Reduce::Concat`] 组合。
     pub fn new(agents: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             agents: agents.into_iter().map(Into::into).collect(),
@@ -499,13 +496,13 @@ impl FanOut {
         }
     }
 
-    /// Choose how answers are combined.
+    /// 选择回答如何被组合。
     pub fn with_reduce(mut self, reduce: Reduce) -> Self {
         self.reduce = reduce;
         self
     }
 
-    /// Queue the task on every named agent.
+    /// 把任务排队到每个被点名的智能体上。
     pub fn dispatch(
         &self,
         world: &mut World,
@@ -528,15 +525,14 @@ impl FanOut {
         Ok(queued)
     }
 
-    /// Combine finished answers according to [`Reduce`].
+    /// 按 [`Reduce`] 组合已完成的回答。
     ///
-    /// Each mode waits for only what it needs: [`Reduce::Concat`] needs every
-    /// branch finished, [`Reduce::Longest`] needs every branch settled (failed
-    /// branches are dropped), and [`Reduce::First`] needs only the first roster
-    /// branch. While a mode's requirement is unmet it returns
-    /// [`OrchestratorError::Incomplete`], counting every finished branch. A
-    /// failure that a mode cannot ignore is reported as
-    /// [`OrchestratorError::BranchFailed`] rather than waited on forever.
+    /// 每种模式只等待它所需之物：[`Reduce::Concat`] 需要每个分支完成，
+    /// [`Reduce::Longest`] 需要每个分支落定（失败的分支被丢弃），
+    /// 而 [`Reduce::First`] 只需要名册中第一个分支。当一种模式的要求
+    /// 未满足时，它返回 [`OrchestratorError::Incomplete`]，并计数每个
+    /// 已完成的分支。一种模式无法忽略的失败被报告为
+    /// [`OrchestratorError::BranchFailed`]，而非被永远等待。
     pub fn reduce(&self, world: &World, roster: &Roster) -> Result<String, OrchestratorError> {
         let mut branches = Vec::with_capacity(self.agents.len());
         for name in &self.agents {
@@ -619,19 +615,17 @@ fn overlap(task: &str, description: &str) -> usize {
         .count()
 }
 
-/// Tell the driver that agent work was just queued, even if React already
-/// reported itself settled earlier in the same frame. The claim belongs to the
-/// React system: it drains agent work and clears the claim when agents settle,
-/// and if React is isolated the schedule releases the claim on its behalf.
+/// 告知驱动器刚刚有智能体工作被排队，即便 React 在同一帧更早时
+/// 已报告自己落定。该认领属于 React 系统：它排空智能体工作并在
+/// 智能体落定时清除认领，而如果 React 被隔离，调度器代它释放认领。
 async fn mark_agents_busy(ctx: &SystemContext) {
     ctx.with_world_mut(|world| Work::ensure(world).set_owned("agents", true, "react"))
         .await;
 }
 
-/// Stop the branches a [`Reduce::First`] reduction no longer needs, so they do
-/// not keep spending after the answer is already in hand. Each cancelled branch
-/// is failed with a diagnostic reason and recorded in the [`Observer`], mirroring
-/// how the runtime reports stopped agents.
+/// 停止一次 [`Reduce::First`] 归约不再需要的那些分支，使它们在回答
+/// 已在手后不再继续花费。每个被取消的分支以一个诊断原因失败，
+/// 并被记入 [`Observer`]，与运行时报告被停止智能体的方式一致。
 async fn cancel_open_branches(ctx: &SystemContext, fan: &FanOut, roster: &Roster) {
     ctx.with_world_mut(|world| {
         let mut events = Vec::new();
@@ -659,10 +653,10 @@ async fn cancel_open_branches(ctx: &SystemContext, fan: &FanOut, roster: &Roster
     .await;
 }
 
-/// A one-shot system that routes a task to the best-matching agent.
+/// 一个把任务路由到最匹配智能体的一次性系统。
 ///
-/// Add it before [`xihe_agent::React`] in the schedule so the chosen agent
-/// starts working in the same frame.
+/// 在调度器中把它加在 [`xihe_agent::React`] 之前，使被选中的智能体
+/// 在同一帧开始工作。
 pub struct RouteTask {
     router: Router,
     roster: Roster,
@@ -671,7 +665,7 @@ pub struct RouteTask {
 }
 
 impl RouteTask {
-    /// Route `task` through `router` over `roster`, once.
+    /// 通过 `router` 在 `roster` 上路由 `task`，一次。
     pub fn new(router: Router, roster: Roster, task: impl Into<String>) -> Self {
         Self {
             router,
@@ -714,10 +708,10 @@ impl System for RouteTask {
     }
 }
 
-/// A system that hands one agent's answer to another once the source finishes.
+/// 一旦源智能体完成就把它的回答交给另一个的系统。
 ///
-/// Add it after [`xihe_agent::React`] so it sees the finished status in the
-/// same frame the source agent completed.
+/// 在调度器中把它加在 [`xihe_agent::React`] 之后，使它在源智能体
+/// 完成的同一帧看到已完成状态。
 pub struct HandoffWhenFinished {
     handoff: Handoff,
     roster: Roster,
@@ -725,7 +719,7 @@ pub struct HandoffWhenFinished {
 }
 
 impl HandoffWhenFinished {
-    /// Apply `handoff` over `roster` when the source agent is finished.
+    /// 当源智能体已完成时，在 `roster` 上应用 `handoff`。
     pub fn new(handoff: Handoff, roster: Roster) -> Self {
         Self {
             handoff,
@@ -782,20 +776,19 @@ impl System for HandoffWhenFinished {
     }
 }
 
-/// The reduced answer a [`FanOutTask`] produced, stored as a world resource.
+/// 一个 [`FanOutTask`] 产出的归约回答，作为世界资源存储。
 #[derive(Clone, Debug)]
 pub struct FanOutResult(pub String);
 
-/// A system that sends the same task to several agents and reduces their answers.
+/// 把同一任务发给若干智能体并归约它们回答的系统。
 ///
-/// Dispatches on the first frame, then writes a [`FanOutResult`] resource as soon
-/// as the configured [`Reduce`] is satisfied: every branch finished for
-/// [`Reduce::Concat`], every branch settled (failed ones dropped) for
-/// [`Reduce::Longest`], or just the first roster branch for [`Reduce::First`].
+/// 在第一帧分派，然后一旦所配置的 [`Reduce`] 被满足就写入一个
+/// [`FanOutResult`] 资源：[`Reduce::Concat`] 要每个分支完成，
+/// [`Reduce::Longest`] 要每个分支落定（失败的被丢弃），
+/// 而 [`Reduce::First`] 只要名册中第一个分支。
 ///
-/// Add it after [`xihe_agent::React`]: it reduces once the branches finish, so
-/// running it before React lets the driver settle in the dispatch frame, before
-/// the reduce ever runs.
+/// 把它加在 [`xihe_agent::React`] 之后：它在分支完成后归约，因此
+/// 在 React 之前运行它会让驱动器在分派帧就落定，早于归约运行。
 pub struct FanOutTask {
     fan: FanOut,
     roster: Roster,
@@ -805,7 +798,7 @@ pub struct FanOutTask {
 }
 
 impl FanOutTask {
-    /// Send `task` to the agents in `fan`, reducing with its configured strategy.
+    /// 把 `task` 发给 `fan` 中的智能体，以其配置的策略归约。
     pub fn new(fan: FanOut, roster: Roster, task: impl Into<String>) -> Self {
         Self {
             fan,
@@ -872,7 +865,7 @@ impl System for FanOutTask {
     }
 }
 
-/// A one-shot system that assigns tasks through a supervisor.
+/// 一个通过监督者分派任务的一次性系统。
 pub struct SupervisorAssign {
     supervisor: Supervisor,
     assignments: Vec<(String, String)>,
@@ -880,7 +873,7 @@ pub struct SupervisorAssign {
 }
 
 impl SupervisorAssign {
-    /// Queue each `(agent, task)` pair through `supervisor`, once.
+    /// 通过 `supervisor` 把每个 `(agent, task)` 对排队，一次。
     pub fn new(supervisor: Supervisor, assignments: Vec<(String, String)>) -> Self {
         Self {
             supervisor,
@@ -980,7 +973,7 @@ mod tests {
     fn a_handoff_refuses_an_unfinished_source() {
         let mut world = World::new();
         let roster = team(&mut world);
-        // scribe is asked but has not finished: there is no answer to hand off.
+        // scribe 被提问但尚未完成：没有回答可交接。
         let scribe = roster.get("scribe").unwrap().entity;
         world
             .get_mut::<ReactAgent>(scribe)
@@ -1130,8 +1123,8 @@ mod tests {
         let roster = team(&mut world);
         let fan = FanOut::new(["scribe", "ops"]);
         fan.dispatch(&mut world, &roster, "review").expect("queued");
-        // ops finishes while scribe is still open: the count must include ops,
-        // not stop at the first open branch in roster order.
+        // ops 在 scribe 仍开放时完成：计数必须包含 ops，
+        // 而非停在名册顺序中第一个开放分支处。
         finish(&mut world, "ops", &roster, "done");
         assert!(matches!(
             fan.reduce(&world, &roster),
@@ -1145,8 +1138,8 @@ mod tests {
         let roster = team(&mut world);
         let fan = FanOut::new(["scribe", "ops"]);
         fan.dispatch(&mut world, &roster, "review").expect("queued");
-        // scribe is still open, ops has failed permanently. The team can never
-        // complete, so this must surface as BranchFailed, not a wait signal.
+        // scribe 仍开放，ops 已永久失败。团队永远无法完成，
+        // 因此这必须浮现为 BranchFailed，而非一个等待信号。
         let ops = roster.get("ops").unwrap().entity;
         world
             .get_mut::<ReactAgent>(ops)
@@ -1166,7 +1159,7 @@ mod tests {
         let fan = FanOut::new(["scribe", "ops"]).with_reduce(Reduce::First);
         fan.dispatch(&mut world, &roster, "review").expect("queued");
         finish(&mut world, "scribe", &roster, "the first answer");
-        // ops is still open, but First only needs the first roster branch.
+        // ops 仍开放，但 First 只需要名册中第一个分支。
         assert_eq!(
             fan.reduce(&world, &roster).expect("reduced"),
             "the first answer"
@@ -1179,8 +1172,8 @@ mod tests {
         let roster = team(&mut world);
         let fan = FanOut::new(["scribe", "ops"]).with_reduce(Reduce::First);
         fan.dispatch(&mut world, &roster, "review").expect("queued");
-        // ops finished but scribe (the first branch) is still open: First must
-        // wait for scribe, not hand back ops's answer.
+        // ops 完成了但 scribe（第一个分支）仍开放：First 必须
+        // 等待 scribe，而非交回 ops 的回答。
         finish(&mut world, "ops", &roster, "a later answer");
         assert!(matches!(
             fan.reduce(&world, &roster),
@@ -1196,8 +1189,8 @@ mod tests {
         fan.dispatch(&mut world, &roster, "review").expect("queued");
         finish(&mut world, "scribe", &roster, "a usable answer");
         fail(&mut world, "ops", &roster);
-        // A failed sibling is dropped, not waited on and not fatal: the longest
-        // finished answer still reduces.
+        // 一个失败的兄弟分支被丢弃，不被等待也不致命：最长的
+        // 已完成回答仍能归约。
         assert_eq!(
             fan.reduce(&world, &roster).expect("reduced"),
             "a usable answer"
@@ -1211,7 +1204,7 @@ mod tests {
         let fan = FanOut::new(["scribe", "ops"]).with_reduce(Reduce::Longest);
         fan.dispatch(&mut world, &roster, "review").expect("queued");
         finish(&mut world, "scribe", &roster, "short");
-        // ops may still produce a longer answer, so Longest waits for it.
+        // ops 仍可能产出更长的回答，因此 Longest 等待它。
         assert!(matches!(
             fan.reduce(&world, &roster),
             Err(OrchestratorError::Incomplete { .. })
@@ -1301,7 +1294,7 @@ mod tests {
             "review",
         );
         system.run(ctx.clone()).await.expect("dispatched");
-        // scribe (the first branch) finishes; ops is still open and spending.
+        // scribe（第一个分支）完成；ops 仍开放且在花费。
         ctx.with_world_mut(|world| finish(world, "scribe", &roster, "the first answer"))
             .await;
         system.run(ctx.clone()).await.expect("reduced");

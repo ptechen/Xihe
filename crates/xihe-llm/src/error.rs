@@ -1,102 +1,102 @@
-//! Failures a provider can return, and whether the runtime should retry them.
+//! 提供方可返回的失败，以及运行时是否应重试它们。
 
 use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
-/// Everything that can go wrong between us and a model.
+/// 我们与模型之间可能出错的一切。
 ///
-/// The variants split by *disposition*, not by HTTP detail: retry, stop, or
-/// reconfigure. [`LlmError::is_retryable`] is what [`crate::ChatClient`] trusts.
+/// 各变体按*处置方式*而非 HTTP 细节划分：重试、停止或重新配置。
+/// [`LlmError::is_retryable`] 正是 [`crate::ChatClient`] 所信赖的。
 #[derive(Clone, Debug, PartialEq)]
 pub enum LlmError {
-    /// The request never produced a usable response (DNS, connect, TLS, reset).
-    /// The request never reached the server, or the connection broke.
+    /// 请求从未产出可用响应（DNS、连接、TLS、重置）。
+    /// 请求从未到达服务器，或连接中断。
     Transport {
-        /// Human-readable detail from the transport layer.
+        /// 来自传输层的可读细节。
         message: String,
     },
 
-    /// The server answered with a non-success status.
+    /// 服务器以非成功状态作答。
     Api {
-        /// HTTP status code.
+        /// HTTP 状态码。
         status: u16,
-        /// The body, or the `error.message` extracted from it.
+        /// 响应体，或从中提取的 `error.message`。
         message: String,
     },
 
-    /// Credentials were rejected; retrying cannot help.
+    /// 凭据被拒绝；重试无济于事。
     Auth {
-        /// What the server said about the key.
+        /// 服务器对该密钥的说法。
         message: String,
     },
 
-    /// The provider asked us to slow down.
+    /// 提供方要求我们放慢速度。
     RateLimited {
-        /// How long to wait, when the server says.
+        /// 服务器指明时应等待多久。
         retry_after: Option<Duration>,
     },
 
-    /// The call exceeded its deadline.
+    /// 调用超过了其截止时间。
     Timeout {
-        /// The deadline that was configured.
+        /// 所配置的截止时间。
         elapsed: Duration,
     },
 
-    /// The body did not match the protocol.
+    /// 响应体不符合协议。
     Decode {
-        /// The parse failure.
+        /// 解析失败。
         message: String,
     },
 
-    /// The runtime cancelled the call (shutdown, stop token, user interrupt).
+    /// 运行时取消了调用（关停、停止令牌、用户中断）。
     Cancelled,
 
-    /// The provider does not implement this operation.
+    /// 提供方未实现此操作。
     Unsupported {
-        /// Which provider said no.
+        /// 哪个提供方拒绝了。
         provider: String,
-        /// The operation that is missing, e.g. `streaming`.
+        /// 缺失的操作，例如 `streaming`。
         operation: String,
     },
 
-    /// The provider was misconfigured.
+    /// 提供方配置有误。
     Config {
-        /// What is missing or invalid.
+        /// 缺失或无效的内容。
         message: String,
     },
 
-    /// Every attempt failed; the last error is attached.
+    /// 每次尝试都失败；附上最后一个错误。
     Exhausted {
-        /// How many attempts were made.
+        /// 进行了多少次尝试。
         attempts: u32,
-        /// The final underlying failure.
+        /// 最终的底层失败。
         last: Box<LlmError>,
     },
 }
 
 impl LlmError {
-    /// Wrap a transport-level message.
+    /// 包装一条传输层消息。
     pub fn transport(message: impl Display) -> Self {
         Self::Transport {
             message: message.to_string(),
         }
     }
 
-    /// Wrap a protocol-level message.
+    /// 包装一条协议层消息。
     pub fn decode(message: impl Display) -> Self {
         Self::Decode {
             message: message.to_string(),
         }
     }
 
-    /// Wrap a configuration message.
+    /// 包装一条配置消息。
     pub fn config(message: impl Into<String>) -> Self {
         Self::Config {
             message: message.into(),
         }
     }
 
-    /// A non-success status together with the server's message.
+    /// 非成功状态连同服务器的消息。
     pub fn api(status: u16, message: impl Into<String>) -> Self {
         Self::Api {
             status,
@@ -104,7 +104,7 @@ impl LlmError {
         }
     }
 
-    /// Name the provider and the operation it lacks.
+    /// 指明提供方及其缺失的操作。
     pub fn unsupported(provider: impl Into<String>, operation: impl Into<String>) -> Self {
         Self::Unsupported {
             provider: provider.into(),
@@ -112,7 +112,7 @@ impl LlmError {
         }
     }
 
-    /// Wrap the final failure after `attempts` tries.
+    /// 包装 `attempts` 次尝试后的最终失败。
     pub fn exhausted(attempts: u32, last: LlmError) -> Self {
         Self::Exhausted {
             attempts,
@@ -120,10 +120,10 @@ impl LlmError {
         }
     }
 
-    /// Should the retry loop call the provider again?
+    /// 重试循环是否应再次调用提供方？
     ///
-    /// Transient transport, timeout, 429 and most 5xx answers are worth another
-    /// try; auth, decode, cancellation and configuration errors are not.
+    /// 瞬时的传输、超时、429 与大多数 5xx 应答值得再试一次；
+    /// 鉴权、解码、取消与配置错误则不值得。
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Transport { .. } | Self::Timeout { .. } | Self::RateLimited { .. } => true,
@@ -139,7 +139,7 @@ impl LlmError {
         }
     }
 
-    /// How long the provider asked to wait, if it said.
+    /// 提供方要求等待多久（若它指明了）。
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::RateLimited { retry_after } => *retry_after,
@@ -148,7 +148,7 @@ impl LlmError {
         }
     }
 
-    /// The error class, used as a low-cardinality metric label.
+    /// 错误类别，用作低基数指标标签。
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Transport { .. } => "transport",
@@ -164,7 +164,7 @@ impl LlmError {
         }
     }
 
-    /// The innermost error, unwrapping any [`LlmError::Exhausted`] wrapper.
+    /// 最内层的错误，解开任何 [`LlmError::Exhausted`] 包装。
     pub fn root(&self) -> &Self {
         match self {
             Self::Exhausted { last, .. } => last.root(),
@@ -173,7 +173,7 @@ impl LlmError {
     }
 }
 
-/// Keeps provider error bodies from swallowing the log line.
+/// 防止提供方错误体吞没整行日志。
 fn clipped(message: &str) -> String {
     const LIMIT: usize = 240;
     let Some((end, _)) = message.char_indices().nth(LIMIT) else {

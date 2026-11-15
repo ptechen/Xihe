@@ -1,39 +1,39 @@
-//! The request a provider receives: model, conversation, tools, sampling.
+//! 提供方接收的请求：模型、对话、工具、采样。
 
 use crate::message::{ChatMessage, GenerationParams, Role, ToolChoice, ToolDescriptor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// A stable identity for a model call, used to key record-and-replay so two
-/// agents issuing byte-identical requests do not collide. Never sent to the
-/// provider: [`to_wire`](crate::to_wire) builds the request body field by field.
+/// 模型调用的稳定身份，用作录制与回放的键，使两个发出字节相同请求的
+/// 智能体不会冲突。绝不发送给提供方：[`to_wire`](crate::to_wire) 逐字段
+/// 构建请求体。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Correlation {
-    /// The agent that issued the call.
+    /// 发起调用的智能体。
     pub agent: String,
-    /// The agent's turn number when the call was made.
+    /// 发起调用时智能体的轮号。
     pub turn: usize,
 }
 
-/// Everything needed to ask a model for the next turn.
+/// 向模型请求下一轮所需的一切。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GenerationRequest {
-    /// Target model; empty means the client's default.
+    /// 目标模型；为空表示使用客户端默认值。
     pub model: String,
-    /// The conversation, oldest first.
+    /// 对话，最旧的在前。
     pub messages: Vec<ChatMessage>,
-    /// Tools the model may call.
+    /// 模型可调用的工具。
     pub tools: Vec<ToolDescriptor>,
-    /// How strongly tool use is encouraged.
+    /// 鼓励使用工具的强度。
     pub tool_choice: ToolChoice,
-    /// Sampling parameters.
+    /// 采样参数。
     pub params: GenerationParams,
-    /// Optional record-and-replay identity; ignored by providers and the wire.
+    /// 可选的录制与回放身份；提供方与传输层忽略它。
     pub correlation: Option<Correlation>,
 }
 
 impl GenerationRequest {
-    /// A request aimed at `model` with default parameters.
+    /// 以默认参数面向 `model` 的请求。
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
@@ -42,49 +42,49 @@ impl GenerationRequest {
         }
     }
 
-    /// Seed the conversation with a system prompt.
+    /// 用系统提示词为对话播种。
     pub fn with_system(mut self, instructions: impl Into<String>) -> Self {
         self.messages.push(ChatMessage::system(instructions));
         self
     }
 
-    /// Append a user turn.
+    /// 追加一个用户轮。
     pub fn with_user(mut self, content: impl Into<String>) -> Self {
         self.messages.push(ChatMessage::user(content));
         self
     }
 
-    /// Append a turn verbatim.
+    /// 原样追加一轮。
     pub fn with_message(mut self, message: ChatMessage) -> Self {
         self.messages.push(message);
         self
     }
 
-    /// Extend the conversation.
+    /// 扩展对话。
     pub fn with_messages(mut self, messages: impl IntoIterator<Item = ChatMessage>) -> Self {
         self.messages.extend(messages);
         self
     }
 
-    /// Replace the tool list.
+    /// 替换工具列表。
     pub fn with_tools(mut self, tools: Vec<ToolDescriptor>) -> Self {
         self.tools = tools;
         self
     }
 
-    /// Append one tool.
+    /// 追加一个工具。
     pub fn with_tool(mut self, tool: ToolDescriptor) -> Self {
         self.tools.push(tool);
         self
     }
 
-    /// Set the tool-choice policy.
+    /// 设置工具选择策略。
     pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
         self.tool_choice = choice;
         self
     }
 
-    /// Tag the call with a stable agent-and-turn identity for record-and-replay.
+    /// 为调用打上稳定的智能体与轮身份标签，用于录制与回放。
     pub fn with_correlation(mut self, agent: impl Into<String>, turn: usize) -> Self {
         self.correlation = Some(Correlation {
             agent: agent.into(),
@@ -93,34 +93,34 @@ impl GenerationRequest {
         self
     }
 
-    /// Replace the sampling parameters.
+    /// 替换采样参数。
     ///
-    /// This overwrites anything an earlier `with_max_tokens` call set, so apply
-    /// the parameter block first and the individual overrides after.
+    /// 这会覆盖先前 `with_max_tokens` 调用设置的任何值，
+    /// 因此先应用参数块，再应用各个单独覆盖。
     pub fn with_params(mut self, params: GenerationParams) -> Self {
         self.params = params;
         self
     }
 
-    /// Switch to greedy decoding.
+    /// 切换到贪心解码。
     pub fn deterministic(mut self) -> Self {
         self.params = GenerationParams::deterministic();
         self
     }
 
-    /// Cap the assistant turn.
+    /// 为助手轮设置上限。
     pub fn with_max_tokens(mut self, tokens: u32) -> Self {
         self.params.max_output_tokens = Some(tokens);
         self
     }
 
-    /// Drop the system message and return the rest, e.g. to re-fit a window.
+    /// 丢弃系统消息并返回其余部分，例如用于重新适配窗口。
     pub fn without_system(mut self) -> Self {
         self.messages.retain(|message| !message.role.is_system());
         self
     }
 
-    /// The first system message, if present.
+    /// 第一条系统消息（若存在）。
     pub fn system_prompt(&self) -> Option<&str> {
         self.messages
             .iter()
@@ -128,7 +128,7 @@ impl GenerationRequest {
             .map(|message| message.content.as_str())
     }
 
-    /// The most recent user text.
+    /// 最近的用户文本。
     pub fn last_user(&self) -> Option<&str> {
         self.messages
             .iter()
@@ -137,13 +137,13 @@ impl GenerationRequest {
             .map(|message| message.content.as_str())
     }
 
-    /// Rough prompt size, used for budget checks before the call is made.
+    /// 粗略的提示词大小，用于在发起调用前做预算检查。
     pub fn estimated_prompt_tokens(&self) -> usize {
         self.messages.iter().map(ChatMessage::tokens).sum::<usize>()
             + self.tools.iter().map(tool_schema_size).sum::<usize>()
     }
 
-    /// Names of the attached tools.
+    /// 所附工具的名称。
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.iter().map(|tool| tool.name.as_str()).collect()
     }
@@ -155,22 +155,22 @@ fn tool_schema_size(tool: &ToolDescriptor) -> usize {
     )
 }
 
-/// A named override of selected request fields, applied by agent builders and
-/// [`crate::ChatClient`] without cloning the whole request.
+/// 对选定请求字段的命名覆盖，由智能体构建器与 [`crate::ChatClient`]
+/// 应用，无需克隆整个请求。
 #[derive(Clone, Debug, Default)]
 pub struct RequestPatch {
-    /// Model override.
+    /// 模型覆盖。
     pub model: Option<String>,
-    /// Full parameter replacement.
+    /// 完整参数替换。
     pub params: Option<GenerationParams>,
-    /// Output cap override.
+    /// 输出上限覆盖。
     pub max_output_tokens: Option<u32>,
-    /// Merged into `params.extensions` object-wise.
+    /// 按对象方式合并进 `params.extensions`。
     pub extra: Value,
 }
 
 impl RequestPatch {
-    /// A patch that only changes the model.
+    /// 只更改模型的补丁。
     pub fn model(model: impl Into<String>) -> Self {
         Self {
             model: Some(model.into()),
@@ -178,7 +178,7 @@ impl RequestPatch {
         }
     }
 
-    /// Merge this patch into a request.
+    /// 将此补丁合并进请求。
     pub fn apply(&self, request: &mut GenerationRequest) {
         if let Some(model) = &self.model {
             request.model = model.clone();

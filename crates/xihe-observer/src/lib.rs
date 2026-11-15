@@ -1,63 +1,63 @@
-//! Observability for a Xihe world.
+//! 一个 Xihe 世界的可观测性。
 //!
-//! [`Observer`] is a world resource. Systems and the driver record events into
-//! it; nothing here reaches out to a network. A snapshot is plain data, so a
-//! test can assert on it and a demo can print it.
+//! [`Observer`] 是一个世界资源。系统与驱动器把事件记入其中；
+//! 这里没有任何东西向外触及网络。快照是纯数据，因此测试可以
+//! 对它断言，demo 可以打印它。
 
 use std::fmt::{self, Display, Formatter};
 use std::time::{Duration, Instant};
 
 use xihe_core::World;
 
-/// What happened, in the order it happened.
+/// 发生了什么，按其发生的顺序。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventKind {
-    /// A schedule frame started.
+    /// 一个调度器帧开始。
     Frame {
-        /// Frame number, starting at 1 for the first recorded frame.
+        /// 帧编号，第一个被录制的帧从 1 开始。
         number: u64,
     },
-    /// A system finished one activation.
+    /// 一个系统完成了一次激活。
     System {
-        /// System name.
+        /// 系统名。
         name: String,
-        /// Whether it returned an error.
+        /// 它是否返回了错误。
         failed: bool,
-        /// How long the activation took, in microseconds.
+        /// 此次激活耗时多久，以微秒计。
         elapsed_us: u64,
     },
-    /// A model call completed.
+    /// 一次模型调用完成。
     Model {
-        /// Provider identifier.
+        /// 提供方标识符。
         provider: String,
-        /// Model name.
+        /// 模型名。
         model: String,
-        /// Input tokens, when known.
+        /// 输入 token，已知时。
         input_tokens: u64,
-        /// Output tokens, when known.
+        /// 输出 token，已知时。
         output_tokens: u64,
-        /// Whether the call failed.
+        /// 调用是否失败。
         failed: bool,
     },
-    /// A tool call completed.
+    /// 一次工具调用完成。
     Tool {
-        /// Tool name.
+        /// 工具名。
         name: String,
-        /// Whether the tool reported success.
+        /// 工具是否报告成功。
         ok: bool,
     },
-    /// An agent changed status.
+    /// 一个智能体改变了状态。
     Agent {
-        /// Agent name.
+        /// 智能体名。
         name: String,
-        /// Status name, matching [`xihe_agent::AgentStatus::as_str`].
+        /// 状态名，与 [`xihe_agent::AgentStatus::as_str`] 一致。
         status: String,
     },
-    /// A free-form note.
+    /// 一条自由格式的备注。
     Note {
-        /// Who wrote it.
+        /// 谁写的。
         source: String,
-        /// The note.
+        /// 备注内容。
         text: String,
     },
 }
@@ -95,42 +95,42 @@ impl Display for EventKind {
     }
 }
 
-/// One recorded event.
+/// 一个被录制的事件。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
-    /// Monotonic sequence, starting at 1.
+    /// 单调序列号，从 1 开始。
     pub seq: u64,
-    /// What happened.
+    /// 发生了什么。
     pub kind: EventKind,
 }
 
-/// Counters derived from the event log.
+/// 从事件日志派生的计数器。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
-    /// Frames recorded.
+    /// 录制的帧数。
     pub frames: u64,
-    /// System activations.
+    /// 系统激活次数。
     pub system_runs: u64,
-    /// System activations that failed.
+    /// 失败的系统激活次数。
     pub system_failures: u64,
-    /// Model calls.
+    /// 模型调用次数。
     pub model_calls: u64,
-    /// Model calls that failed.
+    /// 失败的模型调用次数。
     pub model_failures: u64,
-    /// Input tokens recorded.
+    /// 录制的输入 token。
     pub input_tokens: u64,
-    /// Output tokens recorded.
+    /// 录制的输出 token。
     pub output_tokens: u64,
-    /// Tool calls recorded.
+    /// 录制的工具调用次数。
     pub tool_calls: u64,
-    /// Tool calls that failed.
+    /// 失败的工具调用次数。
     pub tool_failures: u64,
-    /// Agent status changes.
+    /// 智能体状态变更次数。
     pub agent_events: u64,
 }
 
 impl Snapshot {
-    /// Tokens recorded across every model call.
+    /// 跨每次模型调用录制的 token。
     pub fn tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens
     }
@@ -153,11 +153,10 @@ impl Display for Snapshot {
     }
 }
 
-/// The event log, stored as a world resource.
+/// 事件日志，作为世界资源存储。
 ///
-/// The retained window can be bounded with [`Observer::with_retention`] so a
-/// long-running world does not accumulate events without limit. [`Snapshot`]
-/// counters are cumulative and survive trimming.
+/// 保留窗口可用 [`Observer::with_retention`] 加以限定，使一个长期运行的
+/// 世界不会无限制地累积事件。[`Snapshot`] 计数器是累计的，在裁剪后依然存续。
 #[derive(Clone, Debug, Default)]
 pub struct Observer {
     events: Vec<Event>,
@@ -168,28 +167,27 @@ pub struct Observer {
 }
 
 impl Observer {
-    /// An empty log.
+    /// 一个空日志。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Keep at most `limit` recent events; `0` (the default) means unlimited.
+    /// 至多保留 `limit` 个最近事件；`0`（默认）表示无限制。
     ///
-    /// Trimming drops the oldest events from [`Observer::events`] but leaves the
-    /// cumulative [`Snapshot`] counters intact, so a bounded log still reports
-    /// lifetime totals.
+    /// 裁剪从 [`Observer::events`] 丢弃最旧的事件，但保持累计的
+    /// [`Snapshot`] 计数器完好，因此一个有界日志仍报告整个生命周期的总量。
     pub fn with_retention(mut self, limit: usize) -> Self {
         self.retention = limit;
         self.trim();
         self
     }
 
-    /// The retention limit, `0` for unlimited.
+    /// 保留上限，`0` 表示无限制。
     pub fn retention(&self) -> usize {
         self.retention
     }
 
-    /// Record `kind` and return its sequence number.
+    /// 录制 `kind` 并返回其序列号。
     pub fn record(&mut self, kind: EventKind) -> u64 {
         if self.started.is_none() {
             self.started = Some(Instant::now());
@@ -202,7 +200,7 @@ impl Observer {
         seq
     }
 
-    /// Drop the oldest events beyond the retention limit.
+    /// 丢弃超出保留上限的最旧事件。
     fn trim(&mut self) {
         if self.retention > 0 && self.events.len() > self.retention {
             let excess = self.events.len() - self.retention;
@@ -210,12 +208,12 @@ impl Observer {
         }
     }
 
-    /// Record a frame boundary.
+    /// 录制一个帧边界。
     pub fn frame(&mut self, number: u64) -> u64 {
         self.record(EventKind::Frame { number })
     }
 
-    /// Record a system activation.
+    /// 录制一次系统激活。
     pub fn system(&mut self, name: impl Into<String>, failed: bool, elapsed: Duration) -> u64 {
         self.record(EventKind::System {
             name: name.into(),
@@ -224,7 +222,7 @@ impl Observer {
         })
     }
 
-    /// Record a model call.
+    /// 录制一次模型调用。
     pub fn model(
         &mut self,
         provider: impl Into<String>,
@@ -242,7 +240,7 @@ impl Observer {
         })
     }
 
-    /// Record a tool call.
+    /// 录制一次工具调用。
     pub fn tool(&mut self, name: impl Into<String>, ok: bool) -> u64 {
         self.record(EventKind::Tool {
             name: name.into(),
@@ -250,7 +248,7 @@ impl Observer {
         })
     }
 
-    /// Record an agent status change.
+    /// 录制一次智能体状态变更。
     pub fn agent(&mut self, name: impl Into<String>, status: impl Into<String>) -> u64 {
         self.record(EventKind::Agent {
             name: name.into(),
@@ -258,7 +256,7 @@ impl Observer {
         })
     }
 
-    /// Record a note.
+    /// 录制一条备注。
     pub fn note(&mut self, source: impl Into<String>, text: impl Into<String>) -> u64 {
         self.record(EventKind::Note {
             source: source.into(),
@@ -266,34 +264,34 @@ impl Observer {
         })
     }
 
-    /// The retained events, oldest first.
+    /// 保留的事件，最旧的在前。
     pub fn events(&self) -> &[Event] {
         &self.events
     }
 
-    /// How many events are retained in the log.
+    /// 日志中保留了多少事件。
     pub fn len(&self) -> usize {
         self.events.len()
     }
 
-    /// Whether nothing has been recorded.
+    /// 是否尚未录制任何内容。
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }
 
-    /// Time since the first event.
+    /// 自第一个事件以来的时间。
     pub fn elapsed(&self) -> Duration {
         self.started
             .map_or(Duration::ZERO, |started| started.elapsed())
     }
 
-    /// Cumulative counters over every event ever recorded, including any that
-    /// have since been trimmed from the retained window.
+    /// 对曾经录制的每个事件的累计计数器，包括此后已从保留窗口
+    /// 裁剪掉的任何事件。
     pub fn snapshot(&self) -> Snapshot {
         self.totals
     }
 
-    /// The log as lines, for a demo or a failing test.
+    /// 日志按行呈现，供 demo 或失败的测试使用。
     pub fn render(&self) -> String {
         self.events
             .iter()
@@ -302,7 +300,7 @@ impl Observer {
             .join("\n")
     }
 
-    /// JSON object with the snapshot and the event lines.
+    /// 含快照与事件行的 JSON 对象。
     pub fn to_json(&self) -> serde_json::Value {
         let snapshot = self.snapshot();
         serde_json::json!({
@@ -319,7 +317,7 @@ impl Observer {
         })
     }
 
-    /// Read the observer out of a world, inserting an empty one when absent.
+    /// 从世界中读出观察器，缺失时插入一个空的。
     pub fn ensure(world: &mut World) -> &mut Self {
         if !world.has_resource::<Self>() {
             world.insert_resource(Self::new());
@@ -328,7 +326,7 @@ impl Observer {
     }
 }
 
-/// Fold one event into the cumulative counters.
+/// 把一个事件折入累计计数器。
 fn accumulate(snapshot: &mut Snapshot, kind: &EventKind) {
     match kind {
         EventKind::Frame { .. } => snapshot.frames += 1,

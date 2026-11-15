@@ -1,4 +1,4 @@
-//! The system trait: an async unit of agent logic with declared access.
+//! 系统 trait：带声明访问权限的智能体逻辑异步单元。
 
 use std::borrow::Cow;
 use std::fmt;
@@ -12,40 +12,40 @@ use crate::access::Access;
 use crate::context::SystemContext;
 use crate::error::SystemError;
 
-/// Result of one system run.
+/// 一次系统运行的结果。
 pub type SysResult<T = ()> = Result<T, SystemError>;
 
-/// Boxed, `Send` future returned by boxed systems.
+/// 装箱系统返回的装箱 `Send` future。
 pub type SystemFuture<'a> = Pin<Box<dyn Future<Output = SysResult> + Send + 'a>>;
 
-/// How often a system should run inside a schedule.
+/// 系统在调度器内应多久运行一次。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Period {
-    /// Every `n` frames (`n` >= 1).
+    /// 每 `n` 帧（`n` >= 1）。
     Frames(u64),
-    /// At most once per `Duration`.
+    /// 每个 `Duration` 至多一次。
     Time(Duration),
 }
 
 impl Period {
-    /// Runs every frame.
+    /// 每帧运行。
     pub fn every_frame() -> Self {
         Self::Frames(1)
     }
 
-    /// Millisecond shorthand for time-based periods.
+    /// 基于时间的周期的毫秒简写。
     pub fn millis(millis: u64) -> Self {
         Self::Time(Duration::from_millis(millis))
     }
 
 }
 
-/// A single step of agent logic.
+/// 智能体逻辑的一个步骤。
 ///
-/// Implement it by hand for stateful systems (a retry counter, a client pool) or
-/// use [`system`] to wrap a closure. The context is passed **by value** so the
-/// returned future owns everything it needs and stays `Send`, which is what lets
-/// a parallel stage spawn its systems onto tokio workers.
+/// 为有状态系统（重试计数器、客户端池）手动实现它，或用 [`system`]
+/// 包装一个闭包。上下文**按值**传递，使返回的 future 拥有它所需的
+/// 一切并保持 `Send`，这正是让并行阶段能把其系统派生到
+/// tokio worker 上的原因。
 ///
 /// ```
 /// use xihe_schedule::{system, Access, SystemContext, SysResult};
@@ -65,29 +65,29 @@ impl Period {
 /// ```
 #[async_trait]
 pub trait System: Send + Sync {
-    /// Label used in logs, errors and ordering hints.
+    /// 用于日志、错误与排序提示的标签。
     fn name(&self) -> &str {
         "system"
     }
 
-    /// World access this system needs. The default is [`Access::exclusive`]:
-    /// systems that want to be parallelised must opt in.
+    /// 此系统需要的世界访问权限。默认是 [`Access::exclusive`]：
+    /// 想要被并行化的系统必须主动选择。
     fn access(&self) -> Access {
         Access::exclusive()
     }
 
-    /// Optional cadence override for the scheduler.
+    /// 供调度器使用的可选节奏覆盖。
     fn period(&self) -> Option<Period> {
         None
     }
 
-    /// Runs once per scheduled appearance.
+    /// 每次被调度出现时运行一次。
     async fn run(&mut self, ctx: SystemContext) -> SysResult;
 }
 
-/// A [`System`] built from a closure plus declarative metadata.
+/// 由一个闭包加声明式元数据构建的 [`System`]。
 ///
-/// Create it with [`system`], then chain access and cadence helpers.
+/// 用 [`system`] 创建它，然后链式调用访问权限与节奏辅助方法。
 pub struct FnSystem {
     name: Cow<'static, str>,
     access: Option<Access>,
@@ -96,7 +96,7 @@ pub struct FnSystem {
 }
 
 impl FnSystem {
-    /// Wraps a closure that turns a context into a future.
+    /// 包装一个将上下文转为 future 的闭包。
     pub fn new<F, Fut>(name: impl Into<Cow<'static, str>>, mut f: F) -> Self
     where
         F: FnMut(SystemContext) -> Fut + Send + Sync + 'static,
@@ -112,33 +112,32 @@ impl FnSystem {
         }
     }
 
-    /// Replaces the access declaration.
+    /// 替换访问权限声明。
     pub fn with_access(mut self, access: Access) -> Self {
         self.access = Some(access);
         self
     }
 
-    /// Declares a read of `T`. The first declaration also drops the implicit
-    /// exclusive default, otherwise `reads` would be a no-op.
+    /// 声明对 `T` 的读取。第一个声明还会丢弃隐含的独占默认值，
+    /// 否则 `reads` 将不起作用。
     pub fn reads<T: 'static>(mut self) -> Self {
         self.access = Some(self.unwrap_access().and_read::<T>());
         self
     }
 
-    /// Declares a write of `T`.
+    /// 声明对 `T` 的写入。
     pub fn writes<T: 'static>(mut self) -> Self {
         self.access = Some(self.unwrap_access().and_write::<T>());
         self
     }
 
-    /// Declares "reads the world, writes nothing", the cheapest way to allow
-    /// concurrency.
+    /// 声明“读取世界、不写入任何东西”，这是允许并发的最廉价方式。
     pub fn read_only(mut self) -> Self {
         self.access = Some(Access::read_only());
         self
     }
 
-    /// Declares exclusive access (the default).
+    /// 声明独占访问（默认值）。
     pub fn exclusive(mut self) -> Self {
         self.access = Some(Access::exclusive());
         self
@@ -148,39 +147,39 @@ impl FnSystem {
         self.access.clone().unwrap_or_default()
     }
 
-    /// Runs every `n` frames.
+    /// 每 `n` 帧运行。
     pub fn every_frames(mut self, frames: u64) -> Self {
         self.period = Some(Period::Frames(frames.max(1)));
         self
     }
 
-    /// Runs at most once per `period`.
+    /// 每个 `period` 至多运行一次。
     pub fn every(mut self, period: Duration) -> Self {
         self.period = Some(Period::Time(period));
         self
     }
 
-    /// System name.
+    /// 系统名称。
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Declared access, [`Access::exclusive`] when nothing was declared.
+    /// 声明的访问权限，未声明时为 [`Access::exclusive`]。
     pub fn access(&self) -> Access {
         self.access.clone().unwrap_or_else(Access::exclusive)
     }
 
-    /// Cadence override.
+    /// 节奏覆盖。
     pub fn period(&self) -> Option<Period> {
         self.period
     }
 
-    /// Erases the concrete system into a boxed trait object.
+    /// 将具体系统擦除为装箱 trait 对象。
     pub fn into_boxed(self) -> Box<dyn System> {
         Box::new(self)
     }
 
-    /// Borrows the boxed action, for drivers that must not move the system.
+    /// 借用装箱的动作，供不能移动系统的驱动器使用。
     pub fn call(&mut self, ctx: SystemContext) -> SystemFuture<'_> {
         (self.action)(ctx)
     }
@@ -215,9 +214,9 @@ impl fmt::Debug for FnSystem {
     }
 }
 
-/// Wraps an async closure as a named system with exclusive access.
+/// 将一个异步闭包包装为带独占访问权限的命名系统。
 ///
-/// The closure receives an owned [`SystemContext`]:
+/// 闭包接收一个拥有的 [`SystemContext`]：
 ///
 /// ```
 /// use xihe_schedule::{system, SystemContext};
@@ -236,21 +235,21 @@ where
     FnSystem::new(name, f)
 }
 
-/// Erases any concrete system for storage in a schedule.
+/// 擦除任意具体系统以便存放在调度器中。
 pub fn boxed<S: System + 'static>(system: S) -> Box<dyn System> {
     Box::new(system)
 }
 
-/// Runs a future to completion, turning a panic into a [`SystemError`] so one
-/// failing agent cannot unwind the whole schedule.
+/// 将一个 future 运行至完成，把 panic 转为 [`SystemError`]，使一个
+/// 失败的智能体无法 unwind 整个调度器。
 ///
-/// Each activation runs inside a `system` tracing span carrying the system's
-/// name, so a host subscriber sees per-system timing and failures. The span is
-/// entered with [`tracing::Instrument`] rather than a guard, which keeps it
-/// correct across the future's await points.
+/// 每次激活都在一个携带系统名称的 `system` tracing span 内运行，
+/// 因此宿主订阅者能看到逐系统的计时与失败。该 span 用
+/// [`tracing::Instrument`] 而非守卫进入，这使它在 future 的各
+/// await 点之间保持正确。
 ///
-/// Tokio locks are not poisoned, so a guard dropped by the unwinding future is
-/// simply released and the next frame starts from a consistent world.
+/// Tokio 锁不会被毒化，因此被 unwind 的 future 丢弃的守卫只是
+/// 被释放，下一帧从一个一致的世界开始。
 pub async fn run_guarded<F>(name: &str, future: F) -> SysResult
 where
     F: Future<Output = SysResult>,
@@ -275,9 +274,9 @@ where
     }
 }
 
-/// Diagnostic view of a boxed system.
+/// 装箱系统的诊断视图。
 pub trait SystemName {
-    /// Name of the boxed system.
+    /// 装箱系统的名称。
     fn system_name(&self) -> String;
 }
 
@@ -336,7 +335,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.name, "boom");
         assert!(error.to_string().contains("panicked"));
-        // the read guard taken before the panic must not wedge the world
+        // panic 之前取得的读守卫绝不能卡死世界
         assert_eq!(ctx.world.read().await.len(), 0);
     }
 
@@ -396,14 +395,13 @@ mod tests {
     async fn each_activation_runs_in_a_named_system_span() {
         let capture = SpanCapture::default();
         let seen = capture.names.clone();
-        // tracing caches each callsite's interest process-wide. With a single
-        // registered subscriber it rebuilds that cache against the thread-local
-        // default of whichever thread happens to trigger a rebuild, so parallel
-        // tests running on the no-op subscriber race to flip the shared `system`
-        // callsite to `never` and these spans vanish nondeterministically. A
-        // second registered subscriber forces the thread-independent
-        // dispatcher-list rebuild path, keeping the capture's interest stable no
-        // matter which thread rebuilds; the outer one only exists to do that.
+        // tracing 在进程范围内缓存每个 callsite 的 interest。只有单个
+        // 已注册订阅者时，它会针对恰好触发重建的那个线程的线程局部
+        // 默认值来重建该缓存，因此运行在 no-op 订阅者上的并行测试
+        // 会竞争把共享的 `system` callsite 翻转为 `never`，使这些 span
+        // 非确定性地消失。第二个已注册订阅者会强制走与线程无关的
+        // dispatcher 列表重建路径，无论哪个线程重建都保持 capture 的
+        // interest 稳定；外层那个订阅者存在的唯一目的就是做到这一点。
         let _outer = tracing::subscriber::set_default(SpanCapture::default());
         let _guard = tracing::subscriber::set_default(capture);
         tracing::callsite::rebuild_interest_cache();

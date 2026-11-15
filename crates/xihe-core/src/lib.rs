@@ -1,17 +1,16 @@
 //! # xihe-core
 //!
-//! The entity-component half of the Xihe agent framework: [`World`], [`Entity`],
-//! component storages, typed queries, resources and frame events.
+//! Xihe 智能体框架的实体-组件部分：[`World`]、[`Entity`]、
+//! 组件存储、类型化查询、资源与帧事件。
 //!
-//! * **No `unsafe`** — the crate forbids it at the top of this file, and the
-//!   mutable-iteration API is designed so the borrow checker, not raw pointers,
-//!   proves that component views do not alias.
-//! * **No async, no locks** — a `World` is plain data. Concurrency belongs to the
-//!   driver ([`xihe-schedule`](https://docs.rs/xihe-schedule)), which decides which
-//!   systems may run at the same time.
-//! * **Markers are blanket impls** — every `Send + Sync + 'static` type is a
-//!   [`Component`] and a [`Resource`]; adding `Clone` makes it a [`Message`]. No
-//!   derive, no import, no boilerplate.
+//! * **无 `unsafe`** —— 本 crate 在文件顶部禁止它，可变迭代 API 的设计
+//!   让借用检查器（而非裸指针）来证明组件视图不会别名。
+//! * **无异步、无锁** —— `World` 是纯数据。并发属于驱动器
+//!   ([`xihe-schedule`](https://docs.rs/xihe-schedule))，由它决定哪些
+//!   系统可以同时运行。
+//! * **标记是全覆盖实现** —— 任何 `Send + Sync + 'static` 类型都是
+//!   [`Component`] 和 [`Resource`]；加上 `Clone` 即成为 [`Message`]。
+//!   无需 derive、无需导入、无需样板。
 //!
 //! ```
 //! use xihe_core::World;
@@ -50,7 +49,7 @@ pub use resources::Resources;
 pub use storage::{EntityCursor, SparseSet, Storage, Storages};
 pub use world::{Bundle, MAX_ENTITIES, ReadContext, World, WorldStats};
 
-/// Everything a user normally imports at once.
+/// 用户通常一次性导入的全部内容。
 pub mod prelude {
     pub use crate::{
         Bundle, Component, Entities, Entity, Events, Fetch, Message, Query, Resource, ReadContext,

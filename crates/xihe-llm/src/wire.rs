@@ -1,8 +1,8 @@
-//! The `/chat/completions` wire dialect, with no HTTP in it.
+//! `/chat/completions` 传输方言，其中不含 HTTP。
 //!
-//! This module is always compiled — the `openai` feature only adds the transport
-//! in [`crate::openai`] — so request encoding, response decoding and error
-//! mapping stay tested even for offline builds.
+//! 本模块总是被编译——`openai` feature 只在 [`crate::openai`] 中
+//! 添加传输——因此即使离线构建，请求编码、响应解码与错误映射
+//! 也保持被测试。
 
 use std::time::Duration;
 
@@ -15,10 +15,10 @@ use crate::message::{
 use crate::request::GenerationRequest;
 use crate::GenerationResponse;
 
-/// Render a request the way a chat-completions server expects it.
+/// 按聊天补全服务器期望的方式渲染请求。
 ///
-/// `default_model` is used when the request leaves `model` empty, which is how
-/// [`crate::ChatClient`] lets a client own the model name.
+/// 当请求把 `model` 留空时使用 `default_model`，这正是
+/// [`crate::ChatClient`] 让客户端持有模型名的方式。
 pub fn to_wire(request: &GenerationRequest, default_model: &str) -> Value {
     let model = if request.model.is_empty() {
         default_model
@@ -39,8 +39,8 @@ pub fn to_wire(request: &GenerationRequest, default_model: &str) -> Value {
         body["top_p"] = json!(top_p);
     }
     if let Some(max) = request.params.max_output_tokens {
-        // Some newer servers renamed this field; `extensions` can override it,
-        // so only the spelling that is not already present gets filled in.
+        // 一些较新的服务器重命名了此字段；`extensions` 可以覆盖它，
+        // 因此只填入尚不存在的那种拼写。
         if request.params.extensions.get("max_completion_tokens").is_none() {
             body["max_tokens"] = json!(max);
         }
@@ -70,11 +70,11 @@ pub fn to_wire(request: &GenerationRequest, default_model: &str) -> Value {
         );
         body["tool_choice"] = tool_choice_to_wire(&request.tool_choice);
     } else if request.tool_choice != ToolChoice::Auto {
-        // A forced choice is still meaningful with no tools: it says "answer in text".
+        // 即使没有工具，强制选择仍有意义：它表示“以文本作答”。
         body["tool_choice"] = tool_choice_to_wire(&request.tool_choice);
     }
-    // Provider-specific fields are merged flat: `reasoning_effort`, `response_format`,
-    // `enable_thinking` and friends live here.
+    // 提供方特有字段被扁平合并：`reasoning_effort`、`response_format`、
+    // `enable_thinking` 之类都放在这里。
     if let Value::Object(extra) = &request.params.extensions {
         for (key, value) in extra {
             body[key] = value.clone();
@@ -117,7 +117,7 @@ fn to_wire_message(message: &ChatMessage) -> Value {
                         "type": "function",
                         "function": {
                             "name": call.name,
-                            // The protocol wants arguments as a JSON *string*.
+                            // 协议要求参数为 JSON *字符串*。
                             "arguments": call.arguments_string(),
                         },
                     })
@@ -128,7 +128,7 @@ fn to_wire_message(message: &ChatMessage) -> Value {
     value
 }
 
-/// Decode a non-streaming completion.
+/// 解码一个非流式补全。
 pub fn parse_completion(value: Value) -> Result<GenerationResponse, LlmError> {
     let choice = value
         .get("choices")
@@ -197,7 +197,7 @@ fn parse_usage(value: &Value) -> Option<TokenUsage> {
         usage
             .get(name)
             .and_then(Value::as_u64)
-            // Some gateways report tokens as strings.
+            // 一些网关把 token 报告为字符串。
             .or_else(|| {
                 usage
                     .get(name)
@@ -213,10 +213,10 @@ fn parse_usage(value: &Value) -> Option<TokenUsage> {
     })
 }
 
-/// Pull the next server-sent-events payload out of a growing buffer.
+/// 从不断增长的缓冲区中取出下一个 server-sent-events 载荷。
 ///
-/// Returns `None` when no complete line is buffered yet, and an empty string for
-/// keep-alive lines and event separators, which callers decode as "nothing here".
+/// 当尚无完整行被缓冲时返回 `None`；对保活行与事件分隔符返回空字符串，
+/// 调用者将其解码为“这里没有内容”。
 pub fn take_sse_line(buffer: &mut String) -> Option<String> {
     let newline = buffer.find('\n')?;
     let line = buffer[..newline].trim().to_string();
@@ -226,12 +226,12 @@ pub fn take_sse_line(buffer: &mut String) -> Option<String> {
     }
     match line.strip_prefix("data:") {
         Some(data) => Some(data.trim().to_string()),
-        // Some proxies emit bare JSON without the `data:` prefix.
+        // 一些代理发出不带 `data:` 前缀的裸 JSON。
         None => Some(line),
     }
 }
 
-/// Decode one streaming event. `Ok(None)` means "no content in this frame".
+/// 解码一个流式事件。`Ok(None)` 表示“此帧无内容”。
 pub fn parse_stream_event(data: &str) -> Result<Option<StreamChunk>, LlmError> {
     if data.is_empty() {
         return Ok(None);
@@ -282,8 +282,8 @@ pub fn parse_stream_event(data: &str) -> Result<Option<StreamChunk>, LlmError> {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if name.is_empty() {
-                    // An argument fragment for an earlier frame; the caller that
-                    // needs full arguments should use `generate` instead.
+                    // 属于较早一帧的参数片段；需要完整参数的调用者
+                    // 应改用 `generate`。
                     continue;
                 }
                 let arguments = function
@@ -299,11 +299,11 @@ pub fn parse_stream_event(data: &str) -> Result<Option<StreamChunk>, LlmError> {
     Ok(Some(chunk))
 }
 
-/// Classify a non-success HTTP answer.
+/// 对一个非成功的 HTTP 应答分类。
 ///
-/// `retry_after` is the server's `Retry-After` hint, parsed by the transport
-/// from the response headers; it is carried only on a 429 so [`crate::ChatClient`]
-/// can wait the server's requested delay instead of its own backoff.
+/// `retry_after` 是服务器的 `Retry-After` 提示，由传输层从响应头部解析；
+/// 它只在 429 上携带，使 [`crate::ChatClient`] 能等待服务器要求的延迟，
+/// 而非自己的退避。
 pub fn error_from_status(status: u16, body: String, retry_after: Option<Duration>) -> LlmError {
     let message = extract_api_message(&body).unwrap_or_else(|| body.trim().to_string());
     match status {
@@ -313,15 +313,15 @@ pub fn error_from_status(status: u16, body: String, retry_after: Option<Duration
     }
 }
 
-/// Parse a `Retry-After` header expressed as delta-seconds.
+/// 解析以 delta-seconds 表示的 `Retry-After` 头部。
 ///
-/// The HTTP-date form is not honored: a value that is not a whole number of
-/// seconds yields `None`, and the caller falls back to its own backoff.
+/// 不采纳 HTTP-date 形式：不是整数秒的值产出 `None`，
+/// 调用者回退到自己的退避。
 pub fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
-/// Prefer `error.message` over the whole body so logs stay readable.
+/// 优先取 `error.message` 而非整个体，使日志保持可读。
 pub fn extract_api_message(body: &str) -> Option<String> {
     let value: Value = serde_json::from_str(body).ok()?;
     let message = value.get("error")?;
@@ -540,7 +540,7 @@ mod tests {
             take_sse_line(&mut buffer).is_none(),
             "a partial line must stay buffered"
         );
-        // An event split across two network reads rejoins into one frame.
+        // 跨两次网络读取被拆分的事件会重新合并为一帧。
         let mut buffer = String::new();
         buffer.push_str("data: {\"choices\":[{\"del");
         assert_eq!(take_sse_line(&mut buffer), None);
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(final_frame.finish_reason, Some(FinishReason::Length));
         assert_eq!(final_frame.usage, Some(TokenUsage::new(2, 3)));
         assert!(parse_stream_event("").unwrap().is_none());
-        // A usage-only frame still carries accounting, with no text attached.
+        // 仅含用量的帧仍携带计量，不附带文本。
         let usage_only = parse_stream_event(
             r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
         )
@@ -654,7 +654,7 @@ mod tests {
             panic!("429 must be rate limited");
         };
         assert_eq!(retry_after, Some(Duration::from_secs(7)));
-        // The hint is only meaningful on 429; other classes ignore it.
+        // 该提示只在 429 上有意义；其他类别忽略它。
         assert!(matches!(
             error_from_status(500, "{}".to_string(), Some(Duration::from_secs(7))),
             LlmError::Api { .. }

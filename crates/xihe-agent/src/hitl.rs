@@ -1,16 +1,15 @@
-//! Letting a human say "not without me".
+//! 让人类说“没有我不行”。
 //!
-//! Some tools should never run on a model's say-so: writing to production,
-//! spending money, deleting data. [`ToolRegistry::requires_approval`] marks
-//! them, and the ReAct loop then needs a [`Decision`] from an [`Approver`]
-//! before the call goes through. Without one configured, the loop does not
-//! guess — it parks the agent in
-//! [`AgentStatus::AwaitingApproval`](crate::AgentStatus::AwaitingApproval) with
-//! the request stored on the agent, so whatever drives the world (a CLI, a web
-//! form, a queue) can answer later.
+//! 有些工具绝不应凭模型一句话就运行：写入生产、花钱、删除数据。
+//! [`ToolRegistry::requires_approval`] 标记它们，随后 ReAct 循环
+//! 在调用通过前需要来自 [`Approver`] 的一个 [`Decision`]。
+//! 未配置时，循环不猜测——它把智能体挂起在
+//! [`AgentStatus::AwaitingApproval`](crate::AgentStatus::AwaitingApproval)，
+//! 请求存于智能体上，因此驱动世界的任何东西（CLI、网页表单、
+//! 队列）都能稍后作答。
 //!
-//! The trait is always available; only [`TerminalApprover`], which blocks on
-//! stdin, needs the `hitl` feature.
+//! 该 trait 总是可用；只有阻塞于 stdin 的 [`TerminalApprover`]
+//! 需要 `hitl` feature。
 
 use std::fmt::{self, Display, Formatter};
 
@@ -19,30 +18,29 @@ use serde_json::Value;
 use xihe_core::Entity;
 use xihe_llm::ToolCall;
 
-/// A tool call that is waiting for a person.
+/// 一个正在等待人的工具调用。
 ///
-/// It carries the whole call, not just its name, so a reviewer can see the
-/// arguments the model chose, and it remembers the calls queued behind it —
-/// approving the first one does not silently approve the rest.
+/// 它携带整个调用，而非仅其名字，使审查者能看到模型选择的
+/// 参数；它还记得排在其后的调用——批准第一个不会静默批准其余。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalRequest {
-    /// The agent that wants to run the tool.
+    /// 想要运行该工具的智能体。
     pub agent: Entity,
-    /// Turn the request was raised on.
+    /// 发起请求的轮。
     pub turn: u64,
-    /// The call itself.
+    /// 调用本身。
     pub call: ToolCall,
-    /// Why the tool needs a human, from the tool itself.
+    /// 工具为何需要人，来自工具本身。
     pub reason: String,
-    /// Calls the model asked for after this one, not yet run.
+    /// 模型在此之后请求、尚未运行的调用。
     pub remaining: Vec<ToolCall>,
 }
 
 impl ApprovalRequest {
-    /// The default reason, when the tool did not give one.
+    /// 默认原因，当工具未给出时。
     pub const DEFAULT_REASON: &'static str = "the tool asked for a human before running";
 
-    /// Build a request for `call`, with `remaining` queued behind it.
+    /// 为 `call` 构建一个请求，`remaining` 排在其后。
     pub fn new(agent: Entity, turn: u64, call: &ToolCall, remaining: Vec<ToolCall>) -> Self {
         Self {
             agent,
@@ -53,24 +51,24 @@ impl ApprovalRequest {
         }
     }
 
-    /// Explain why a human is needed.
+    /// 解释为何需要人。
     #[must_use]
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
         self.reason = reason.into();
         self
     }
 
-    /// Name of the tool to be run.
+    /// 将被运行的工具的名字。
     pub fn tool(&self) -> &str {
         &self.call.name
     }
 
-    /// Arguments the model produced.
+    /// 模型产出的参数。
     pub fn arguments(&self) -> &Value {
         &self.call.arguments
     }
 
-    /// A one-line summary safe to show in a log or a prompt.
+    /// 可安全显示在日志或提示词中的一行摘要。
     pub fn summary(&self) -> String {
         let arguments = self.call.arguments.to_string();
         let cut: String = arguments.chars().take(120).collect();
@@ -95,32 +93,32 @@ impl Display for ApprovalRequest {
     }
 }
 
-/// What a reviewer decided.
+/// 审查者决定了什么。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Decision {
-    /// Run the tool.
+    /// 运行该工具。
     Approved,
-    /// Do not run it, with the reason the model gets to see.
+    /// 不运行它，附上模型将看到的原因。
     Rejected {
-        /// Why a human said no.
+        /// 人为何说不。
         reason: String,
     },
 }
 
 impl Decision {
-    /// A rejection with `reason` attached.
+    /// 附上 `reason` 的拒绝。
     pub fn reject(reason: impl Into<String>) -> Self {
         Self::Rejected {
             reason: reason.into(),
         }
     }
 
-    /// Whether the tool may run.
+    /// 该工具是否可运行。
     pub fn is_approved(&self) -> bool {
         matches!(self, Self::Approved)
     }
 
-    /// The rejection reason, if any.
+    /// 拒绝原因（若有）。
     pub fn reason(&self) -> Option<&str> {
         match self {
             Self::Approved => None,
@@ -128,7 +126,7 @@ impl Decision {
         }
     }
 
-    /// What the model is told when the decision is not approval.
+    /// 当决定不是批准时，告知模型的内容。
     pub fn transcript_text(&self) -> String {
         match self {
             Self::Approved => "approved".to_string(),
@@ -146,19 +144,19 @@ impl Display for Decision {
     }
 }
 
-/// Something that can answer an [`ApprovalRequest`].
+/// 能回答 [`ApprovalRequest`] 之物。
 #[async_trait]
 pub trait Approver: Send + Sync {
-    /// Decide whether `request` may run.
+    /// 决定 `request` 是否可运行。
     async fn decide(&self, request: &ApprovalRequest) -> Decision;
 
-    /// Short name used in logs.
+    /// 日志中使用的简短名字。
     fn name(&self) -> &str {
         "approver"
     }
 }
 
-/// Approve everything: for tests and for tools that only *look* dangerous.
+/// 批准一切：用于测试，以及只是*看起来*危险的工具。
 pub struct AlwaysApprove;
 
 #[async_trait]
@@ -172,14 +170,14 @@ impl Approver for AlwaysApprove {
     }
 }
 
-/// Reject everything, with a fixed reason.
+/// 拒绝一切，带一个固定原因。
 pub struct AlwaysReject {
-    /// The reason handed back to the model.
+    /// 交回给模型的原因。
     pub reason: String,
 }
 
 impl AlwaysReject {
-    /// Reject with `reason`.
+    /// 以 `reason` 拒绝。
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -198,10 +196,10 @@ impl Approver for AlwaysReject {
     }
 }
 
-/// Approve the calls a predicate accepts.
+/// 批准谓词接受的调用。
 ///
-/// The predicate sees the request, not the world, so a rule like "only spend
-/// under a limit" is expressible without writing a whole approver.
+/// 谓词看到的是请求，而非世界，因此像“只在限额下花费”这样的规则
+/// 无需写一整个审批器即可表达。
 pub struct RuleApprover<F>
 where
     F: Fn(&ApprovalRequest) -> Decision + Send + Sync,
@@ -214,7 +212,7 @@ impl<F> RuleApprover<F>
 where
     F: Fn(&ApprovalRequest) -> Decision + Send + Sync,
 {
-    /// Approve what `rule` approves.
+    /// 批准 `rule` 所批准的。
     pub fn new(label: impl Into<String>, rule: F) -> Self {
         Self {
             rule,
@@ -237,15 +235,14 @@ where
     }
 }
 
-/// Read a yes/no answer from the terminal.
+/// 从终端读取一个 yes/no 回答。
 ///
-/// Blocking stdin is moved to a blocking thread so the async loop keeps its
-/// other tasks running. Anything other than a bare `y` is a rejection, and the
-/// rejected line becomes the reason the model sees — a human typing "no, use
-/// the staging host instead" is information.
+/// 阻塞的 stdin 被移到一个阻塞线程，使异步循环保持其他任务运行。
+/// 除裸 `y` 之外的任何输入都是拒绝，被拒绝的那行成为模型看到的原因——
+/// 一个人输入“不，改用 staging 主机”本身就是信息。
 #[cfg(feature = "hitl")]
 pub struct TerminalApprover {
-    /// Question printed before reading.
+    /// 读取前打印的问题。
     pub prompt: String,
 }
 
@@ -260,7 +257,7 @@ impl Default for TerminalApprover {
 
 #[cfg(feature = "hitl")]
 impl TerminalApprover {
-    /// Ask with a custom prompt.
+    /// 用自定义提示词询问。
     pub fn with_prompt(prompt: impl Into<String>) -> Self {
         Self {
             prompt: prompt.into(),

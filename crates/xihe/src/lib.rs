@@ -1,9 +1,8 @@
-//! Xihe (羲和) — an entity-component-system for agents.
+//! Xihe (羲和) —— 一个面向智能体的实体-组件-系统。
 //!
-//! The world holds agents, tools and memory. A schedule runs systems against
-//! that world. An agent is a component, not a thread: the same [`React`] system
-//! advances every agent that has work, and a [`Driver`] keeps going until they
-//! settle.
+//! 世界持有智能体、工具与记忆。调度器针对该世界运行系统。智能体是一个
+//! 组件，而非一个线程：同一个 [`React`] 系统推进每个有工作量的智能体，
+//! 而 [`Driver`] 持续运行直到它们落定。
 //!
 //! ```
 //! use xihe::prelude::*;
@@ -23,8 +22,8 @@
 //! #     .enable_all().build().unwrap().block_on(async { run().await.unwrap(); });
 //! ```
 //!
-//! A team is just a schedule: routing, the ReAct loop and a handoff are all
-//! systems, and one [`App::run`] drives them until the world settles.
+//! 一个团队就是一个调度器：路由、ReAct 循环与交接都是系统，
+//! 一次 [`App::run`] 驱动它们直到世界落定。
 //!
 //! ```
 //! use xihe::prelude::*;
@@ -85,7 +84,7 @@ pub use xihe_orchestrator::{
 pub use xihe_runtime::{App, Driver, LlmPlugin, ObserverPlugin, Plugin, ReactPlugin, StopReason, ToolsPlugin};
 pub use xihe_schedule::{Schedule, System, SystemContext, SystemSpec, Work, WorldHandle};
 
-/// Names a demo or a binary usually wants in scope.
+/// demo 或二进制通常希望引入作用域的名字。
 pub mod prelude {
     pub use crate::{
         App, Driver, EchoTool, Entity, LlmPlugin, LlmService, Observer, ObserverPlugin, React,

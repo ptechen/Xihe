@@ -1,11 +1,10 @@
-//! Getting usable data out of an answer that is, at heart, prose.
+//! 从本质上是一段散文的回答中取出可用数据。
 //!
-//! A model asked for JSON often produces JSON *plus* an explanation, or wraps it
-//! in a fenced block, or emits a stray trailing comma. [`ResponseFormat`] holds
-//! the contract for one agent — free text or a schema — and [`extract_json`]
-//! does the forgiving part of reading it. When the answer cannot be parsed, the
-//! format produces the repair message that the ReAct loop sends back, so the
-//! model gets one more chance with its own mistake in front of it.
+//! 被要求输出 JSON 的模型常常产出 JSON *外加*一段解释，或把它
+//! 包在围栏块里，或发出一个多余的尾逗号。[`ResponseFormat`] 持有
+//! 一个智能体的契约——自由文本或一个 schema——而 [`extract_json`]
+//! 做读取中宽容的那部分。当回答无法解析时，格式产出 ReAct 循环
+//! 发回的修复消息，使模型在它自己的错误面前再获一次机会。
 
 use serde_json::Value;
 
@@ -13,23 +12,23 @@ use xihe_llm::ChatMessage;
 
 use crate::AgentError;
 
-/// How an agent's final answer should be read.
+/// 应如何读取智能体的最终回答。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ResponseFormat {
-    /// Prose is the answer; nothing to parse.
+    /// 散文即回答；无需解析。
     #[default]
     Text,
-    /// The answer must be one JSON value matching `schema`.
+    /// 回答必须是匹配 `schema` 的一个 JSON 值。
     Json {
-        /// JSON Schema the caller will validate against.
+        /// 调用者将据以校验的 JSON Schema。
         schema: Value,
-        /// Extra repair chances granted when parsing fails.
+        /// 解析失败时额外授予的修复机会。
         repairs: usize,
     },
 }
 
 impl ResponseFormat {
-    /// Ask for JSON matching `schema`, with [`ResponseFormat::DEFAULT_REPAIRS`] repair shots.
+    /// 要求匹配 `schema` 的 JSON，带 [`ResponseFormat::DEFAULT_REPAIRS`] 次修复机会。
     pub fn json(schema: Value) -> Self {
         Self::Json {
             schema,
@@ -37,7 +36,7 @@ impl ResponseFormat {
         }
     }
 
-    /// Ask for JSON matching `schema`, repairing at most `repairs` times.
+    /// 要求匹配 `schema` 的 JSON，至多修复 `repairs` 次。
     pub fn with_repairs(self, repairs: usize) -> Self {
         match self {
             Self::Json { schema, .. } => Self::Json { schema, repairs },
@@ -45,10 +44,10 @@ impl ResponseFormat {
         }
     }
 
-    /// Repair chances allowed for a JSON answer.
+    /// 一个 JSON 回答允许的修复机会。
     pub const DEFAULT_REPAIRS: usize = 2;
 
-    /// Extra instructions for the system prompt; `None` for prose.
+    /// 给系统提示词的额外指令；散文时为 `None`。
     pub fn instruction(&self) -> Option<String> {
         match self {
             Self::Text => None,
@@ -58,7 +57,7 @@ impl ResponseFormat {
         }
     }
 
-    /// Repair chances left for this format.
+    /// 此格式剩余的修复机会。
     pub fn repairs(&self) -> usize {
         match self {
             Self::Text => 0,
@@ -66,15 +65,15 @@ impl ResponseFormat {
         }
     }
 
-    /// Whether the loop should keep the raw text as the answer instead of parsing.
+    /// 循环是否应保留原始文本作为回答，而非解析。
     pub fn is_text(&self) -> bool {
         matches!(self, Self::Text)
     }
 
-    /// Read `content` as this format.
+    /// 以此格式读取 `content`。
     ///
-    /// `Ok(None)` means "prose, nothing to check"; `Ok(Some(value))` is a parsed
-    /// JSON answer; the error explains what to send back to the model.
+    /// `Ok(None)` 意为“散文，无需检查”；`Ok(Some(value))` 是解析后的
+    /// JSON 回答；错误解释该把什么发回给模型。
     pub fn parse(&self, content: &str) -> Result<Option<Value>, AgentError> {
         match self {
             Self::Text => Ok(None),
@@ -82,7 +81,7 @@ impl ResponseFormat {
         }
     }
 
-    /// The message that shows the model its own unreadable answer.
+    /// 向模型展示它自己那份不可读回答的消息。
     pub fn repair(&self, error: &AgentError) -> ChatMessage {
         let detail = match error {
             AgentError::Output { message, raw } => {
@@ -97,7 +96,7 @@ impl ResponseFormat {
     }
 }
 
-/// Parse JSON out of an answer, tolerating prose and code fences.
+/// 从回答中解析 JSON，容忍散文与代码围栏。
 pub fn parse_json(text: &str) -> Result<Value, AgentError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -117,7 +116,7 @@ pub fn parse_json(text: &str) -> Result<Value, AgentError> {
     ))
 }
 
-/// The substrings worth trying, most likely first.
+/// 值得尝试的子串，最可能的在前。
 fn candidates(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     if let Some(fenced) = strip_fence(text) {
@@ -138,7 +137,7 @@ fn strip_fence(text: &str) -> Option<&str> {
     Some(body[..end].trim())
 }
 
-/// The first balanced `{…}` or `[…]` span, honouring string escapes.
+/// 第一个配平的 `{…}` 或 `[…]` 跨度，尊重字符串转义。
 fn find_balanced(text: &str) -> Option<&str> {
     let bytes = text.as_bytes();
     let start = bytes.iter().position(|byte| *byte == b'{' || *byte == b'[')?;
@@ -176,12 +175,12 @@ fn find_balanced(text: &str) -> Option<&str> {
     None
 }
 
-/// Loose schema checking: does the value carry the keys the schema requires?
+/// 宽松的 schema 检查：值是否携带 schema 所要求的键？
 ///
-/// This is not a JSON Schema validator. It answers the question an agent loop
-/// actually has — "did the model forget a field?" — without pulling in a
-/// validator crate, and reports every missing key at once so one repair round
-/// can fix all of them.
+/// 这不是一个 JSON Schema 校验器。它回答智能体循环真正
+/// 关心的问题——“模型是否漏了一个字段？”——而无需引入
+/// 校验器 crate，并一次性报告每个缺失的键，使一轮修复
+/// 就能把它们全部补齐。
 pub fn missing_required_keys(schema: &Value, value: &Value) -> Vec<String> {
     let Some(object) = value.as_object() else {
         return Vec::new();

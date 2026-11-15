@@ -1,14 +1,14 @@
-//! A world resource that tells the driver whether any system still owes work.
+//! 一个世界资源，告诉驱动器是否仍有系统欠着工作。
 //!
-//! Systems mark themselves busy under a label and clear it when they settle.
-//! The driver stops when no label remains, so it does not have to know about
-//! agents, conversations, or any other domain type.
+//! 系统在某个标签下将自己标记为忙碌，落定时清除它。
+//! 当没有标签剩余时驱动器停止，因此它无需了解
+//! 智能体、对话或任何其他领域类型。
 
 use std::collections::{BTreeSet, HashMap};
 
 use xihe_core::World;
 
-/// Labels of systems that still have unfinished work.
+/// 仍有未完成工作的系统标签。
 #[derive(Clone, Debug, Default)]
 pub struct Work {
     busy: BTreeSet<String>,
@@ -16,38 +16,38 @@ pub struct Work {
 }
 
 impl Work {
-    /// An empty workload.
+    /// 一个空工作量。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Mark `label` as still working, owned by `label` itself.
+    /// 将 `label` 标记为仍在工作，由 `label` 自身拥有。
     pub fn begin(&mut self, label: impl Into<String>) {
         let label = label.into();
         self.begin_owned(label.clone(), label);
     }
 
-    /// Mark `label` as settled, dropping every owner's claim on it.
+    /// 将 `label` 标记为已落定，丢弃每个所有者对它的认领。
     pub fn end(&mut self, label: &str) {
         self.busy.remove(label);
         self.owners.remove(label);
     }
 
-    /// Set `label` busy or idle in one call, owned by `label` itself.
+    /// 一次调用将 `label` 设为忙碌或空闲，由 `label` 自身拥有。
     pub fn set(&mut self, label: impl Into<String>, busy: bool) {
         let label = label.into();
         self.set_owned(label.clone(), busy, label);
     }
 
-    /// Mark `label` as still working on behalf of `owner`, the system responsible
-    /// for it. A label stays busy until every owner has settled it.
+    /// 代表 `owner`（负责它的系统）将 `label` 标记为仍在工作。
+    /// 一个标签保持忙碌，直到每个所有者都已将它落定。
     pub fn begin_owned(&mut self, label: impl Into<String>, owner: impl Into<String>) {
         let label = label.into();
         self.busy.insert(label.clone());
         self.owners.entry(label).or_default().insert(owner.into());
     }
 
-    /// Clear `owner`'s claim on `label`; the label settles once no owner owes it.
+    /// 清除 `owner` 对 `label` 的认领；一旦没有所有者欠它，该标签即落定。
     pub fn end_owned(&mut self, label: impl Into<String>, owner: impl Into<String>) {
         let label = label.into();
         if let Some(owners) = self.owners.get_mut(&label) {
@@ -59,7 +59,7 @@ impl Work {
         }
     }
 
-    /// Set `label` busy or idle on behalf of `owner` in one call.
+    /// 一次调用代表 `owner` 将 `label` 设为忙碌或空闲。
     pub fn set_owned(&mut self, label: impl Into<String>, busy: bool, owner: impl Into<String>) {
         if busy {
             self.begin_owned(label, owner);
@@ -68,9 +68,9 @@ impl Work {
         }
     }
 
-    /// Release every label `owner` still owes. Used when a system is isolated
-    /// after failing: it can never settle its own work again, so that work must
-    /// not keep the driver awake forever.
+    /// 释放 `owner` 仍欠着的每个标签。用于某系统失败后被隔离时：
+    /// 它再也无法落定自己的工作，因此那个工作绝不能
+    /// 让驱动器永远保持唤醒。
     pub fn release_owner(&mut self, owner: &str) {
         let labels: Vec<String> = self
             .owners
@@ -83,17 +83,17 @@ impl Work {
         }
     }
 
-    /// Whether any system still owes work.
+    /// 是否仍有系统欠着工作。
     pub fn is_busy(&self) -> bool {
         !self.busy.is_empty()
     }
 
-    /// The labels currently busy, in sorted order.
+    /// 当前忙碌的标签，按排序顺序。
     pub fn labels(&self) -> impl Iterator<Item = &str> {
         self.busy.iter().map(String::as_str)
     }
 
-    /// Read the workload out of a world, inserting an empty one when absent.
+    /// 从世界中读取工作量，缺失时插入一个空的。
     pub fn ensure(world: &mut World) -> &mut Self {
         if !world.has_resource::<Self>() {
             world.insert_resource(Self::new());

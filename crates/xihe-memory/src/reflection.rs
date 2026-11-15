@@ -1,48 +1,45 @@
-//! Reflection: distilling a transcript into a summary, and a summary into the
-//! next steps.
+//! 反思：把转录蒸馏为摘要，再把摘要蒸馏为下一步。
 //!
-//! Two separate jobs live here, deliberately unconnected:
+//! 这里有两个刻意不相连的独立职责：
 //!
-//!   * [`Summariser`] compresses dialogue text. The bundled implementation is
-//!     deterministic and needs no model, so a deployment without one still
-//!     folds long windows; an LLM-backed summariser can be dropped in by the
-//!     agent layer, which is where providers already live.
-//!   * [`reflect`] turns the *most recent* summary into focus points, then
-//!     [`apply_reflection`] ([`crate::components`]) writes them as observations
-//!     and derives plan steps from them.
+//!   * [`Summariser`] 压缩对话文本。自带实现是确定性的、
+//!     无需模型，因此没有模型的部署仍能折叠长窗口；
+//!     由 LLM 支撑的摘要器可由智能体层插入，提供方本就住在那里。
+//!   * [`reflect`] 把*最近的*摘要变成关注点，随后
+//!     [`apply_reflection`]（[`crate::components`]）把它们写为观察，
+//!     并从中推导计划步骤。
 //!
-//! The order is set by information dependency: reflection is derived from
-//! summarised dialogue, and the plan is derived from reflection — so a summary
-//! always feeds the steps, never the other way round.
+//! 顺序由信息依赖决定：反思派生自摘要后的对话，计划派生自反思——
+//! 因此摘要总是喂给步骤，绝不反过来。
 
 use async_trait::async_trait;
 
 use crate::error::{MemoryError, MemoryResult};
 
-/// Compresses a transcript into a shorter piece of text.
+/// 把转录压缩为更短的一段文本。
 #[async_trait]
 pub trait Summariser: Send + Sync {
-    /// Compress a transcript into fewer lines than it started with.
+    /// 把转录压缩为比原先更少的行。
     async fn summarise(&self, transcript: &str) -> MemoryResult<String>;
 
-    /// A stable name for logs and cache keys.
+    /// 用于日志与缓存键的稳定名字。
     fn id(&self) -> &str {
         "summariser"
     }
 }
 
-/// Picks the sentences with the most salient words and keeps them in order.
+/// 挑出含最显著词的句子，并保持其顺序。
 ///
-/// Salience is document frequency: a term used by many lines is common and
-/// worth less. Relevance to the *task* is the caller's problem — add a
-/// [`MemoryScope::LongTerm`] fact search to the prompt to bias the result.
+/// 显著性即文档频率：被许多行使用的词很常见、价值更低。
+/// 与*任务*的相关性是调用者的问题——向提示词加入
+/// [`MemoryScope::LongTerm`] 事实搜索以偏置结果。
 pub struct HeuristicSummariser {
     max_items: usize,
     item_max_chars: usize,
 }
 
 impl HeuristicSummariser {
-    /// Keep the best `max_items` lines, each cut to `item_max_chars`.
+    /// 保留最好的 `max_items` 行，每行截到 `item_max_chars`。
     pub fn new(max_items: usize, item_max_chars: usize) -> Self {
         Self {
             max_items: max_items.max(1),
@@ -50,12 +47,12 @@ impl HeuristicSummariser {
         }
     }
 
-    /// How many lines one summary may contain.
+    /// 一个摘要最多可含多少行。
     pub fn max_items(&self) -> usize {
         self.max_items
     }
 
-    /// Score each line; empty input yields nothing rather than a placeholder.
+    /// 给每行打分；空输入产出空而非占位符。
     pub fn rank(&self, transcript: &str) -> Vec<(String, f64)> {
         let lines: Vec<String> = transcript
             .lines()
@@ -89,7 +86,7 @@ impl HeuristicSummariser {
             .collect();
         scored.sort_by(|a, b| b.1.total_cmp(&a.1));
         scored.truncate(self.max_items);
-        // Presentation follows the dialogue, not the ranking.
+        // 呈现顺序跟随对话，而非排名。
         scored.sort_by(|a, b| {
             let ai = transcript.find(&a.0).unwrap_or(0);
             let bi = transcript.find(&b.0).unwrap_or(0);
@@ -148,24 +145,24 @@ fn trim_chars(text: &str, max_chars: usize) -> String {
     format!("{}…", &text[..cut])
 }
 
-/// What a summary suggests the agent should do next.
+/// 摘要建议智能体接下来做什么。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReflectionStep {
-    /// A thing worth optimising — becomes a focus record.
+    /// 值得优化之事——成为一条关注记录。
     Focus(String),
-    /// A thing that is now known — becomes a long-term fact.
+    /// 现已知晓之事——成为一条长期事实。
     Knowledge(String),
-    /// A caution; a corrective kind also closes the current plan step.
+    /// 一条告诫；纠正类还会关闭当前计划步骤。
     Note {
-        /// What kind of caution this is, e.g. `correction` or `plan`.
+        /// 这是哪类告诫，例如 `correction` 或 `plan`。
         kind: String,
-        /// The caution itself.
+        /// 告诫本身。
         text: String,
     },
 }
 
 impl ReflectionStep {
-    /// A note of the given kind, e.g. `correction` or `plan`.
+    /// 给定类别的一条注释，例如 `correction` 或 `plan`。
     pub fn note(kind: impl Into<String>, text: impl Into<String>) -> Self {
         Self::Note {
             kind: kind.into(),
@@ -174,10 +171,10 @@ impl ReflectionStep {
     }
 }
 
-/// Read the newest summary and derive what to do from it.
+/// 读取最新摘要并从中推导该做什么。
 ///
-/// `tool_activity` and `failures` are counts over the same window the summary
-/// covers; `has_plan` avoids stacking a second planning step while one is open.
+/// `tool_activity` 与 `failures` 是摘要所覆盖同一窗口上的计数；
+/// `has_plan` 避免在已有一个计划步骤未结时再叠加第二个。
 pub fn reflect(
     summary: &str,
     existing_focus: &[String],
@@ -233,7 +230,7 @@ pub fn reflect(
     steps
 }
 
-/// Lines that state something durable rather than ask for something.
+/// 陈述持久之事而非请求某事的行。
 fn sentences_needing_knowledge(summary: &str) -> Vec<String> {
     summary
         .lines()
@@ -255,12 +252,12 @@ fn sentences_needing_knowledge(summary: &str) -> Vec<String> {
         .collect()
 }
 
-/// Lowercased content words, joined — the form comparisons use.
+/// 小写化的内容词，连接起来——比较所用的形式。
 pub fn normalize(text: &str) -> String {
     tokens(text).join(" ")
 }
 
-/// True when either phrase contains the other, or they share most content words.
+/// 当任一短语包含另一个、或它们共享大部分内容词时为真。
 pub fn similar(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
@@ -272,20 +269,20 @@ pub fn similar(a: &str, b: &str) -> bool {
     let right: std::collections::HashSet<&str> = b.split(' ').collect();
     let smaller = left.len().min(right.len()).max(1);
     let shared = left.intersection(&right).count();
-    // Two short phrases about the same thing usually share half their words.
+    // 关于同一件事的两个短短语通常共享一半的词。
     shared * 2 >= smaller && shared >= 2
 }
 
-/// How much of a scope a reflection is allowed to consume.
+/// 一次反思被允许消耗多少额度。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReflectionBudget {
-    /// Maximum focus points kept after a reflection.
+    /// 一次反思后保留的最大关注点数。
     pub max_focus: usize,
-    /// Maximum new focus points added by one reflection.
+    /// 一次反思新增的最大关注点数。
     pub max_new_focus: usize,
-    /// Maximum notes added by one reflection.
+    /// 一次反思新增的最大注释数。
     pub max_notes: usize,
-    /// Maximum facts added by one reflection.
+    /// 一次反思新增的最大事实数。
     pub max_knowledge: usize,
 }
 
@@ -301,7 +298,7 @@ impl Default for ReflectionBudget {
 }
 
 impl ReflectionBudget {
-    /// Reject a budget that would either stop reflecting or grow without bound.
+    /// 拒绝会停止反思或无界增长的预算。
     pub fn validate(&self) -> MemoryResult<()> {
         if self.max_focus == 0 || self.max_new_focus == 0 {
             return Err(MemoryError::config(

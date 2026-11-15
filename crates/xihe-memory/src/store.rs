@@ -1,4 +1,4 @@
-//! Memory stores: the retrieval trait and an in-memory vector index.
+//! 记忆存储：检索 trait 与一个内存向量索引。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,55 +14,55 @@ use crate::record::{
     now_ms,
 };
 
-/// The store seam: anything that can remember and recall.
+/// 存储接缝：任何能记忆与召回之物。
 ///
-/// Implementations must be `Send + Sync` so several agent entities can share one
-/// long-term memory through an `Arc`.
+/// 实现必须是 `Send + Sync`，使多个智能体实体能通过一个 `Arc`
+/// 共享一份长期记忆。
 #[async_trait]
 pub trait MemoryStore: Send + Sync + 'static {
-    /// Store identifier, reported in [`MemoryStats`].
+    /// 存储标识符，在 [`MemoryStats`] 中报告。
     fn id(&self) -> &str;
 
-    /// Embedder used when a record is stored without a vector.
+    /// 当记录不带向量被存储时所用的嵌入器。
     fn embedder(&self) -> Option<&dyn Embedder> {
         None
     }
 
-    /// Remember a record, assigning ids and validating dimensions.
+    /// 记住一条记录，分配 id 并校验维度。
     ///
-    /// A record whose embedding is empty is encoded with the store's embedder
-    /// first, so callers can insert text without caring about vectors; a record
-    /// carrying a wrong-sized vector is rejected instead of re-encoded.
+    /// 嵌入为空的记录先用存储的嵌入器编码，因此调用者可以
+    /// 插入文本而无需关心向量；携带错误尺寸向量的记录会被拒绝，
+    /// 而非重新编码。
     async fn insert(&self, record: MemoryRecord) -> MemoryResult<MemoryId>;
 
-    /// Remember text, embedding it with the store's embedder.
+    /// 记住文本，用存储的嵌入器嵌入它。
     async fn remember(&self, kind: MemoryKind, text: &str) -> MemoryResult<MemoryId> {
         self.insert(MemoryRecord::new(kind, text, Embedding::default()))
             .await
     }
 
-    /// Retrieve the best matches, highest score first.
+    /// 检索最佳匹配，评分最高者优先。
     async fn search(&self, query: &MemoryQuery) -> MemoryResult<Vec<ScoredRecord>>;
 
-    /// Fetch one record by id.
+    /// 按 id 取一条记录。
     async fn get(&self, id: MemoryId) -> MemoryResult<Option<MemoryRecord>>;
 
-    /// Forget one record.
+    /// 忘记一条记录。
     async fn remove(&self, id: MemoryId) -> MemoryResult<bool>;
 
-    /// Drop everything this entity remembered.
+    /// 丢弃此实体记住的一切。
     async fn forget_entity(&self, owner: Entity) -> MemoryResult<usize>;
 
-    /// Apply the retention policy, returning how many records were dropped.
+    /// 应用保留策略，返回丢弃了多少记录。
     async fn consolidate(&self, policy: &RetentionPolicy) -> MemoryResult<usize>;
 
-    /// Everything in the store, insertion order.
+    /// 存储中的一切，按插入顺序。
     async fn snapshot(&self) -> Vec<MemoryRecord>;
 
-    /// Counters for logging and tests.
+    /// 用于日志与测试的计数器。
     async fn stats(&self) -> MemoryStats;
 
-    /// Records matching a predicate, in insertion order.
+    /// 匹配某谓词的记录，按插入顺序。
     async fn find(
         &self,
         predicate: &(dyn for<'a> Fn(&'a MemoryRecord) -> bool + Sync),
@@ -74,7 +74,7 @@ pub trait MemoryStore: Send + Sync + 'static {
             .collect()
     }
 
-    /// Convenience: the single best match, if any.
+    /// 便利方法：单个最佳匹配（若有）。
     async fn recall(&self, query: &MemoryQuery) -> MemoryResult<Option<ScoredRecord>> {
         Ok(self
             .search(&query.clone().with_top_k(1))
@@ -84,34 +84,34 @@ pub trait MemoryStore: Send + Sync + 'static {
     }
 }
 
-/// Counters describing a store.
+/// 描述一个存储的计数器。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryStats {
-    /// Records currently held.
+    /// 当前持有的记录数。
     pub records: usize,
-    /// Cumulative insertions, including later-deleted ones.
+    /// 累计插入数，含后来被删除的。
     pub inserts: u64,
-    /// Cumulative retrievals served.
+    /// 累计已服务的检索数。
     pub hits: u64,
-    /// Cumulative records removed by delete or retention.
+    /// 累计被删除或保留策略移除的记录数。
     pub evictions: u64,
-    /// Total `search` calls, whether or not anything matched.
+    /// `search` 调用总数，无论是否有匹配。
     pub queries: u64,
 }
 
-/// Tuning for [`InMemoryStore::search`].
+/// [`InMemoryStore::search`] 的调参。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SearchOptions {
-    /// Multiply the requested `top_k` when candidates are gathered, so diversity
-    /// has something to choose from.
+    /// 收集候选时把所请求的 `top_k` 乘以此值，
+    /// 使多样性有可供挑选的余地。
     pub candidate_multiplier: usize,
-    /// `0.0` is pure relevance, `1.0` is pure diversity.
+    /// `0.0` 为纯相关性，`1.0` 为纯多样性。
     pub mmf_lambda: f64,
-    /// Recency half-life applied to scores; `0` disables it.
+    /// 施加到评分上的新近性半衰期；`0` 禁用它。
     pub half_life_ms: u64,
-    /// Update `accessed_at_ms` and `access_count` for returned records.
+    /// 为返回的记录更新 `accessed_at_ms` 与 `access_count`。
     pub reinforce_hits: bool,
-    /// Score memories owned by nobody as if they were slightly less relevant.
+    /// 把无人拥有的记忆评分得仿佛相关性略低。
     pub unowned_penalty: f64,
 }
 
@@ -128,33 +128,33 @@ impl Default for SearchOptions {
 }
 
 impl SearchOptions {
-    /// Rank by relevance only.
+    /// 仅按相关性排序。
     pub fn pure_relevance() -> Self {
         Self::default()
     }
 
-    /// Diversify results so a prompt does not fill up with near-duplicates.
+    /// 使结果多样化，免得提示词被近重复项填满。
     pub fn with_diversity(mut self, lambda: f64) -> Self {
         self.mmf_lambda = lambda.clamp(0.0, 1.0);
         self
     }
 
-    /// Weight scores by recency.
+    /// 按新近性给评分加权。
     pub fn with_recency(mut self, half_life: std::time::Duration) -> Self {
         self.half_life_ms = half_life.as_millis() as u64;
         self
     }
 
-    /// Leave access counters alone, for read-only probes.
+    /// 不动访问计数器，用于只读探查。
     pub const fn without_reinforcement(mut self) -> Self {
         self.reinforce_hits = false;
         self
     }
 }
 
-/// A brute-force vector index, which is the right shape for the tens of thousands
-/// of memories an agent session actually holds.
-/// Retrieval counters, kept separate so each saturates on its own.
+/// 一个暴力向量索引，这正是智能体会话实际持有的数万条记忆
+/// 所适合的形态。
+/// 检索计数器，分开保存以便各自独立饱和。
 #[derive(Debug, Default)]
 struct Counters {
     inserts: AtomicU64,
@@ -163,11 +163,11 @@ struct Counters {
     queries: AtomicU64,
 }
 
-/// A brute-force vector index.
+/// 一个暴力向量索引。
 ///
-/// Cloning shares the stored memories — that is how several agent entities read
-/// one long-term memory through an `Arc` — while `with_name` and `with_options`
-/// tune only the handle they are called on.
+/// 克隆会共享已存储的记忆——这正是多个智能体实体通过一个 `Arc`
+/// 读取一份长期记忆的方式——而 `with_name` 与 `with_options`
+/// 只调整被调用它们的那个句柄。
 #[derive(Clone)]
 pub struct InMemoryStore {
     records: std::sync::Arc<RwLock<Vec<MemoryRecord>>>,
@@ -196,12 +196,12 @@ impl Default for InMemoryStore {
 }
 
 impl InMemoryStore {
-    /// An unlabelled in-memory store with the hashing embedder.
+    /// 带哈希嵌入器、无标签的内存存储。
     pub fn new() -> Self {
         Self::with_embedder(HashingEmbedder::default())
     }
 
-    /// A store that embeds on `remember`, sized to the embedder.
+    /// 在 `remember` 时嵌入、尺寸取自嵌入器的存储。
     pub fn with_embedder<E: Embedder>(embedder: E) -> Self {
         let dimensions = embedder.dimensions();
         Self {
@@ -215,7 +215,7 @@ impl InMemoryStore {
         }
     }
 
-    /// A store with no embedder: callers supply their own vectors.
+    /// 无嵌入器的存储：调用者自备向量。
     pub fn bare(dimensions: usize) -> Self {
         Self {
             records: std::sync::Arc::new(RwLock::new(Vec::new())),
@@ -228,29 +228,29 @@ impl InMemoryStore {
         }
     }
 
-    /// Name the store, so logs can tell two memories apart.
+    /// 给存储命名，使日志能区分两份记忆。
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
     }
 
-    /// Replace the search tuning.
+    /// 替换搜索调参。
     pub fn with_options(mut self, options: SearchOptions) -> Self {
         self.options = options;
         self
     }
 
-    /// The embedder vectors are compared against, if the store has one.
+    /// 向量据以比较的嵌入器（若存储有）。
     pub fn embedder(&self) -> Option<&dyn Embedder> {
         self.embedder.as_deref()
     }
 
-    /// Vector width this store accepts.
+    /// 此存储接受的向量宽度。
     pub fn dimensions(&self) -> usize {
         self.dimensions
     }
 
-    /// Search tuning in force.
+    /// 当前生效的搜索调参。
     pub fn options(&self) -> SearchOptions {
         self.options
     }
@@ -275,7 +275,7 @@ impl InMemoryStore {
         counter.fetch_add(amount as u64, Ordering::Relaxed);
     }
 
-    /// Validate a record against the store's dimensions before it is kept.
+    /// 在保留记录前，对照存储维度校验它。
     fn check(&self, record: &MemoryRecord) -> MemoryResult<()> {
         if self.dimensions > 0 && record.embedding.dimensions() != self.dimensions {
             return Err(MemoryError::dimension_mismatch(
@@ -286,7 +286,7 @@ impl InMemoryStore {
         Ok(())
     }
 
-    /// Similarity of a record to the query vector, with store-level adjustments.
+    /// 记录与查询向量的相似度，带存储级调整。
     fn similarity(&self, record: &MemoryRecord, vector: &Embedding, at: Timestamp) -> f64 {
         let cosine = record.embedding.cosine(vector);
         let weighted = record.scored(cosine, at, self.options.half_life_ms);
@@ -297,8 +297,8 @@ impl InMemoryStore {
         }
     }
 
-    /// Maximal-marginal-relevance selection: relevance minus redundancy against
-    /// records already chosen.
+    /// 最大边际相关性选择：相关性减去相对已选记录的
+    /// 冗余。
     fn diversify(candidates: &[ScoredRecord], lambda: f64) -> Vec<ScoredRecord> {
         if lambda <= 0.0 || candidates.len() < 2 {
             return candidates.to_vec();
@@ -330,14 +330,14 @@ impl InMemoryStore {
             chosen.push(picked);
             order.push(picked);
         }
-        // The chosen order is the answer: re-sorting by relevance would put the
-        // near-duplicates back at the front, and a truncated caller would never
-        // see the diversity MMR just bought.
+        // 选出的顺序就是答案：按相关性重排会把近重复项
+        // 放回前面，而被截断的调用者将永远看不到 MMR
+        // 刚买来的多样性。
         order.iter().map(|&index| candidates[index].clone()).collect()
     }
 }
 
-/// Which [`Counters`] field an operation touches.
+/// 一次操作触碰 [`Counters`] 的哪个字段。
 #[derive(Clone, Copy)]
 enum Counter {
     Inserts,
@@ -368,8 +368,8 @@ impl MemoryStore for InMemoryStore {
         if record.id == 0 {
             record.id = self.next_id.fetch_add(1, Ordering::Relaxed);
         } else {
-            // Keep the id generator ahead of any externally assigned id, so ids
-            // stay unique no matter who mints them.
+            // 让 id 生成器领先于任何外部分配的 id，
+            // 使无论谁铸造 id 都保持唯一。
             loop {
                 let current = self.next_id.load(Ordering::Relaxed);
                 if current > record.id {
@@ -527,7 +527,7 @@ mod tests {
             .unwrap();
     }
 
-    /// An entity identified only by its index; tests do not need generations.
+    /// 仅由其索引标识的实体；测试不需要世代。
     fn entity(index: u32) -> Entity {
         Entity::from_raw(index, 1)
     }

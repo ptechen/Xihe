@@ -1,4 +1,4 @@
-//! `ChatClient`: a provider plus a retry policy and a default model.
+//! `ChatClient`：一个提供方加上重试策略与默认模型。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,10 +8,10 @@ use crate::message::{ChatMessage, GenerationParams, GenerationResponse};
 use crate::provider::{DynProvider, Provider, StreamBox};
 use crate::request::GenerationRequest;
 
-/// A spread in `0.0..1.0` derived from the wall clock's sub-second part.
+/// 由挂钟的亚秒部分导出的 `0.0..1.0` 区间内的散布值。
 ///
-/// Retry jitter only needs to decorrelate concurrent callers, so a cheap,
-/// dependency-free source beats pulling in a random number crate.
+/// 重试抖动只需让并发调用者去相关，因此一个廉价、无依赖的来源
+/// 胜过引入一个随机数 crate。
 fn sub_second_fraction() -> f32 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -20,18 +20,18 @@ fn sub_second_fraction() -> f32 {
     (nanos % 1_000) as f32 / 1_000.0
 }
 
-/// How the client re-attempts a transient failure.
+/// 客户端如何重试瞬时失败。
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetryPolicy {
-    /// Total attempts, including the first one.
+    /// 总尝试次数，包含第一次。
     pub attempts: u32,
-    /// Delay before the first retry.
+    /// 第一次重试前的延迟。
     pub initial_backoff: Duration,
-    /// Exponential growth of the base delay.
+    /// 基础延迟的指数增长。
     pub factor: f32,
-    /// Upper bound on any single delay.
+    /// 任何单次延迟的上界。
     pub max_backoff: Duration,
-    /// Random fraction (0.0..=1.0) added to each delay to avoid thundering herds.
+    /// 加到每次延迟上的随机比例（0.0..=1.0），以避免惊群。
     pub jitter: f32,
 }
 
@@ -48,7 +48,7 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// No retries: surface the first failure.
+    /// 不重试：直接浮现第一次失败。
     pub const fn none() -> Self {
         Self {
             attempts: 1,
@@ -59,31 +59,31 @@ impl RetryPolicy {
         }
     }
 
-    /// Total attempts, including the first call.
+    /// 总尝试次数，包含第一次调用。
     pub fn attempts(mut self, attempts: u32) -> Self {
         self.attempts = attempts.max(1);
         self
     }
 
-    /// Set the initial retry delay.
+    /// 设置初始重试延迟。
     pub fn backoff(mut self, initial: Duration) -> Self {
         self.initial_backoff = initial;
         self
     }
 
-    /// Randomised extra delay, as a fraction of the base (0.0..=1.0).
+    /// 随机化的额外延迟，作为基础值的比例（0.0..=1.0）。
     pub fn with_jitter(mut self, jitter: f32) -> Self {
         self.jitter = jitter.clamp(0.0, 1.0);
         self
     }
 
-    /// The delay before `attempt` (1-based: the delay after the first failure).
+    /// `attempt` 之前的延迟（从 1 起：第一次失败后的延迟）。
     pub fn delay_for(&self, attempt: u32) -> Duration {
         let exponent = attempt.saturating_sub(1);
         let base = self.initial_backoff.as_secs_f64() * f64::from(self.factor).powi(exponent as i32);
-        // Cap in seconds before converting: a large attempt index overflows
-        // Duration::from_secs_f64, which panics. min/max also fold a NaN or
-        // negative base into [0, max_backoff], so the conversion is always safe.
+        // 转换前先以秒为单位封顶：很大的尝试索引会让
+        // Duration::from_secs_f64 溢出并 panic。min/max 还会把 NaN 或
+        // 负的基础值折入 [0, max_backoff]，因此转换总是安全的。
         let capped = base.min(self.max_backoff.as_secs_f64()).max(0.0);
         let mut delay = Duration::from_secs_f64(capped);
         if self.jitter > 0.0 && !delay.is_zero() {
@@ -93,16 +93,16 @@ impl RetryPolicy {
         delay
     }
 
-    /// Retries available after the first attempt.
+    /// 第一次尝试之后可用的重试次数。
     pub fn retries(&self) -> u32 {
         self.attempts.saturating_sub(1)
     }
 }
 
-/// A provider with a home model name and a retry policy.
+/// 带有归属模型名与重试策略的提供方。
 ///
-/// Agents hold a `ChatClient` rather than an `Arc<dyn Provider>` so the failure
-/// handling is identical everywhere.
+/// 智能体持有 `ChatClient` 而非 `Arc<dyn Provider>`，
+/// 使失败处理在各处都一致。
 #[derive(Clone)]
 pub struct ChatClient {
     provider: DynProvider,
@@ -112,7 +112,7 @@ pub struct ChatClient {
 }
 
 impl ChatClient {
-    /// Bind a provider to the model name used when a request omits one.
+    /// 将提供方绑定到请求省略模型名时所用的模型名。
     pub fn new(provider: DynProvider, model: impl Into<String>) -> Self {
         Self {
             provider,
@@ -122,46 +122,46 @@ impl ChatClient {
         }
     }
 
-    /// Adopt whatever default model the provider advertises.
+    /// 采用提供方所宣称的默认模型。
     pub fn from_provider<P: Provider>(provider: P) -> Self {
         let arc: DynProvider = Arc::new(provider);
         let model = arc.default_model().to_string();
         Self::new(arc, model)
     }
 
-    /// Replace the retry policy.
+    /// 替换重试策略。
     pub fn with_policy(mut self, policy: RetryPolicy) -> Self {
         self.policy = policy;
         self
     }
 
-    /// Sampling defaults applied when a request leaves them at their own default.
+    /// 当请求把采样参数留为其自身默认值时应用的采样默认值。
     pub fn with_params(mut self, params: GenerationParams) -> Self {
         self.params = Some(params);
         self
     }
 
-    /// The underlying provider, for capability checks and direct streaming.
+    /// 底层提供方，用于能力检查与直接流式读取。
     pub fn provider(&self) -> &DynProvider {
         &self.provider
     }
 
-    /// The provider's short name, e.g. for span attributes.
+    /// 提供方的短名，例如用于 span 属性。
     pub fn provider_id(&self) -> &str {
         self.provider.id()
     }
 
-    /// The default model name.
+    /// 默认模型名。
     pub fn model(&self) -> &str {
         &self.model
     }
 
-    /// The retry policy in force.
+    /// 当前生效的重试策略。
     pub fn policy(&self) -> &RetryPolicy {
         &self.policy
     }
 
-    /// Prepare a request: fill the model, merge defaults, keep explicit choices.
+    /// 准备请求：填充模型、合并默认值、保留显式选择。
     pub fn prepare(&self, request: &GenerationRequest) -> GenerationRequest {
         let mut prepared = request.clone();
         if prepared.model.is_empty() {
@@ -174,7 +174,7 @@ impl ChatClient {
         prepared
     }
 
-    /// Generate with retries for transient failures.
+    /// 生成，并对瞬时失败进行重试。
     pub async fn generate(
         &self,
         request: &GenerationRequest,
@@ -211,7 +211,7 @@ impl ChatClient {
         }
     }
 
-    /// One-shot question answering: system prompt, user text, assistant string.
+    /// 一次性问答：系统提示词、用户文本、助手字符串。
     pub async fn ask(
         &self,
         system: impl Into<String>,
@@ -224,7 +224,7 @@ impl ChatClient {
         Ok(response.content)
     }
 
-    /// Continue a conversation that is already assembled.
+    /// 继续一段已组装好的对话。
     pub async fn complete(
         &self,
         messages: Vec<ChatMessage>,
@@ -233,7 +233,7 @@ impl ChatClient {
             .await
     }
 
-    /// Streamed generation; retried the same way as [`ChatClient::generate`].
+    /// 流式生成；重试方式与 [`ChatClient::generate`] 相同。
     pub async fn stream(
         &self,
         request: &GenerationRequest,
@@ -271,8 +271,8 @@ impl ChatClient {
         }
     }
 
-    /// Collect a stream into one response, useful when the caller cannot handle
-    /// incremental output but the provider only streams.
+    /// 将流收集为单个响应，适用于调用者无法处理增量输出、
+    /// 但提供方只支持流式的情况。
     pub async fn generate_streamed(
         &self,
         request: &GenerationRequest,
@@ -390,8 +390,8 @@ mod tests {
             max_backoff: Duration::from_secs(5),
             ..RetryPolicy::default()
         };
-        // 200ms * 2^199 overflows Duration; the cap must apply before the
-        // conversion, or delay_for panics on a policy meant for a flaky server.
+        // 200ms * 2^199 会溢出 Duration；封顶必须在转换之前应用，
+        // 否则 delay_for 会在一个面向不稳定服务器的策略上 panic。
         assert_eq!(policy.delay_for(200), Duration::from_secs(5));
     }
 
@@ -480,8 +480,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_honors_the_server_retry_after() {
-        // A zero server hint must override a huge local backoff: were the hint
-        // ignored, the retry would sleep for 30s and time out here.
+        // 为零的服务器提示必须覆盖巨大的本地退避：若忽略该提示，
+        // 重试会睡眠 30s 并在此超时。
         let provider = MockProvider::with_script([
             Reply::fail(LlmError::RateLimited {
                 retry_after: Some(Duration::ZERO),

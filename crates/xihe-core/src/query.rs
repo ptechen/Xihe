@@ -1,4 +1,4 @@
-//! Typed, borrow-safe query terms over component storage.
+//! 组件存储之上类型化、借用安全的查询项。
 
 use std::marker::PhantomData;
 
@@ -6,21 +6,21 @@ use crate::component::Component;
 use crate::entity::{Entities, Entity};
 use crate::storage::{EntityCursor, Storages};
 
-/// One term of a query: how to drive the cursor and how to extract the term.
+/// 查询的一个项：如何驱动游标，以及如何提取该项。
 ///
-/// Implementations exist for [`Entity`], `&T`, `Option<&T>` and tuples of up to
-/// four terms. `&mut T` is deliberately *not* a term — exclusive iteration goes
-/// through [`World::edit`](crate::World::edit), which keeps the borrow checker in
-/// charge instead of relying on raw pointers.
+/// 已为 [`Entity`]、`&T`、`Option<&T>` 以及至多四个项的元组提供实现。
+/// `&mut T` 刻意*不*作为项——独占迭代经由
+/// [`World::edit`](crate::World::edit) 进行，由借用检查器主导，
+/// 而非依赖裸指针。
 pub trait Fetch<'w>: Copy + Sized {
-    /// Entities this term wants to iterate. The first required term of a tuple
-    /// decides the cursor, so querying a rare component does not scan the world.
+    /// 该项想要遍历的实体。元组的第一个必需项决定游标，
+    /// 因此查询稀有组件不会扫描整个世界。
     fn cursor(storages: &'w Storages, entities: &'w Entities) -> EntityCursor<'w> {
         let _ = storages;
         Box::new(entities.iter())
     }
 
-    /// Extracts the term for `entity`, or `None` when a required term is missing.
+    /// 提取 `entity` 对应的项，必需项缺失时返回 `None`。
     fn fetch(storages: &'w Storages, entity: Entity) -> Option<Self>;
 }
 
@@ -68,14 +68,14 @@ macro_rules! impl_fetch_tuple {
     };
 }
 
-impl_fetch_tuple!(/// Two terms, e.g. `(&Profile, &Conversation)`
+impl_fetch_tuple!(/// 两个项，例如 `(&Profile, &Conversation)`
     A, B);
-impl_fetch_tuple!(/// Three terms, e.g. `(Entity, &Conversation, Option<&Budget>)`
+impl_fetch_tuple!(/// 三个项，例如 `(Entity, &Conversation, Option<&Budget>)`
     A, B, C);
-impl_fetch_tuple!(/// Four terms
+impl_fetch_tuple!(/// 四个项
     A, B, C, D);
 
-/// Borrowed iterator over the entities matching a query.
+/// 遍历匹配查询的实体的借用迭代器。
 pub struct Query<'w, Q: Fetch<'w>> {
     storages: &'w Storages,
     cursor: EntityCursor<'w>,
@@ -83,7 +83,7 @@ pub struct Query<'w, Q: Fetch<'w>> {
 }
 
 impl<'w, Q: Fetch<'w>> Query<'w, Q> {
-    /// Builds a query over `storages`, driven by the first required term.
+    /// 在 `storages` 上构建查询，由第一个必需项驱动。
     pub(crate) fn new(storages: &'w Storages, entities: &'w Entities) -> Self {
         Self {
             storages,
@@ -92,7 +92,7 @@ impl<'w, Q: Fetch<'w>> Query<'w, Q> {
         }
     }
 
-    /// Drops matching items using `pred`, keeping iteration borrow-safe.
+    /// 用 `pred` 丢弃匹配项，同时保持迭代的借用安全。
     pub fn filter<F>(self, pred: F) -> FilteredQuery<'w, Q, F>
     where
         F: FnMut(Q) -> bool + Send + 'w,
@@ -103,17 +103,17 @@ impl<'w, Q: Fetch<'w>> Query<'w, Q> {
         }
     }
 
-    /// First match, if any.
+    /// 第一个匹配项（若有）。
     pub fn first(self) -> Option<Q> {
         self.into_iter().next()
     }
 
-    /// Collects matches into a vector.
+    /// 将匹配项收集到向量中。
     pub fn collect_vec(self) -> Vec<Q> {
         self.into_iter().collect()
     }
 
-    /// Runs `f` for every match.
+    /// 对每个匹配项运行 `f`。
     pub fn for_each<F>(self, f: F)
     where
         F: FnMut(Q),
@@ -143,7 +143,7 @@ impl<'w, Q: Fetch<'w>> std::fmt::Debug for Query<'w, Q> {
     }
 }
 
-/// [`Query`] with a predicate attached by [`Query::filter`].
+/// 通过 [`Query::filter`] 附加了谓词的 [`Query`]。
 pub struct FilteredQuery<'w, Q: Fetch<'w>, F: FnMut(Q) -> bool> {
     inner: Query<'w, Q>,
     pred: F,
@@ -153,7 +153,7 @@ impl<'w, Q: Fetch<'w>, F: FnMut(Q) -> bool> Iterator for FilteredQuery<'w, Q, F>
     type Item = Q;
 
     fn next(&mut self) -> Option<Q> {
-        // Split borrow: the iterator needs `inner` while the predicate reads `pred`.
+        // 拆分借用：迭代器需要 `inner`，而谓词读取 `pred`。
         let Self { inner, pred } = self;
         inner.by_ref().find(|item| pred(*item))
     }

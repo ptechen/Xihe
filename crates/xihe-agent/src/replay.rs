@@ -1,22 +1,19 @@
-//! Record-and-replay for a world's model calls and tool results.
+//! 对一个世界的模型调用与工具结果进行录制与回放。
 //!
-//! [`Journal`] captures every [`GenerationResponse`] a run produces, keyed by a
-//! deterministic fingerprint of the request that asked for it, along with the
-//! tool results that followed. [`ReplayProvider`] answers from that journal
-//! instead of a live model, and the loop feeds back the recorded tool results
-//! instead of re-running them, so a second run reproduces the first turn for
-//! turn even when the original provider was non-deterministic and the tools had
-//! side effects.
+//! [`Journal`] 捕获一次运行产出的每个 [`GenerationResponse`]，以发起它的
+//! 请求的确定性指纹为键，连同随后产生的工具结果。[`ReplayProvider`]
+//! 从该日志而非实时模型作答，循环反馈录制的工具结果而非重新运行它们，
+//! 因此第二次运行能逐轮复现第一次，即便原提供方是非确定性的、
+//! 工具带有副作用。
 //!
-//! The fingerprint covers the correlation, the messages and the tool descriptors
-//! (sorted by name), not the model name: the client fills the model in after the
-//! request is built, so keying on it would differ between recording and replay.
-//! A journal that already holds a request's tool results replays them; an empty
-//! one records them, so the same resource handles both directions. A round that
-//! parks on a human approval journals its results once the human decides, so
-//! replay neither re-approves nor re-runs the approved tool. To replay a run,
-//! install the populated [`Journal`] as a world resource and back the
-//! [`LlmService`](crate::LlmService) with a [`ReplayProvider`] that shares it.
+//! 指纹覆盖关联标识、消息与工具描述符（按名字排序），而非模型名：
+//! 客户端在请求构建后才填入模型，因此以它为键会在录制与回放之间不同。
+//! 已持有某请求工具结果的日志会回放它们；空日志则录制它们，
+//! 因此同一资源处理两个方向。一个在人工审批处挂起的轮次，
+//! 会在人工决定后把其结果记入日志，因此回放既不重新审批、
+//! 也不重新运行已批准的工具。要回放一次运行，把已填充的 [`Journal`]
+//! 安装为世界资源，并用共享它的 [`ReplayProvider`] 支撑
+//! [`LlmService`](crate::LlmService)。
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -27,10 +24,10 @@ use xihe_llm::{GenerationRequest, GenerationResponse, LlmError, Provider, ToolCa
 
 use crate::tool::ToolOutcome;
 
-/// A shared log of model responses and tool results, stored as a world resource.
+/// 模型响应与工具结果的共享日志，存为世界资源。
 ///
-/// Cloning a journal shares the same entries, so the handle installed in the
-/// recording world and the one handed to [`ReplayProvider`] see one log.
+/// 克隆一个日志会共享同一批条目，因此安装在录制世界中的句柄
+/// 与交给 [`ReplayProvider`] 的句柄看到的是同一份日志。
 #[derive(Clone, Default)]
 pub struct Journal {
     entries: Arc<Mutex<HashMap<String, GenerationResponse>>>,
@@ -38,17 +35,17 @@ pub struct Journal {
     pending: Arc<Mutex<HashMap<String, PendingApproval>>>,
 }
 
-/// The tool results that followed one model response.
+/// 跟随一次模型响应的工具结果。
 #[derive(Clone, Serialize, Deserialize)]
 struct ToolRecord {
     results: Vec<(ToolCall, ToolOutcome)>,
     refused: usize,
 }
 
-/// An approval that parked mid-run: the request that raised it plus the tool
-/// results already in hand, kept so the resume can journal the whole round.
-/// Deliberately not serialized: a journal saved while still parked is an
-/// incomplete recording, and replaying it parks again rather than guessing.
+/// 一次运行中途挂起的审批：发起它的请求，加上已在手的
+/// 工具结果，保留以便恢复时能把整轮记入日志。
+/// 刻意不序列化：仍挂起时保存的日志是不完整的录制，
+/// 回放它会再次挂起，而非猜测。
 #[derive(Clone)]
 struct PendingApproval {
     request: GenerationRequest,
@@ -56,9 +53,9 @@ struct PendingApproval {
     refused: usize,
 }
 
-/// The on-disk form of a journal. `BTreeMap` keeps the byte layout deterministic
-/// (independent of the live maps' hash order), so two recordings of the same run
-/// serialize identically and journals can be diffed or audited.
+/// 日志的磁盘形式。`BTreeMap` 使字节布局确定
+/// （独立于实时映射的哈希顺序），因此同一运行的两次录制
+/// 序列化完全相同，日志可被 diff 或审计。
 #[derive(Serialize, Deserialize)]
 struct JournalData {
     entries: BTreeMap<String, GenerationResponse>,
@@ -66,12 +63,12 @@ struct JournalData {
 }
 
 impl Journal {
-    /// An empty journal.
+    /// 一个空日志。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Store `response` under the fingerprint of `request`.
+    /// 以 `request` 的指纹为键存储 `response`。
     pub fn record(&self, request: &GenerationRequest, response: &GenerationResponse) {
         self.entries
             .lock()
@@ -79,7 +76,7 @@ impl Journal {
             .insert(fingerprint(request), response.clone());
     }
 
-    /// The response recorded for `request`, if any.
+    /// 为 `request` 录制的响应（若有）。
     pub fn lookup(&self, request: &GenerationRequest) -> Option<GenerationResponse> {
         self.entries
             .lock()
@@ -88,7 +85,7 @@ impl Journal {
             .cloned()
     }
 
-    /// Store the tool results that followed `request`.
+    /// 存储跟随 `request` 的工具结果。
     pub fn record_tools(
         &self,
         request: &GenerationRequest,
@@ -101,7 +98,7 @@ impl Journal {
             .insert(fingerprint(request), ToolRecord { results, refused });
     }
 
-    /// The tool results recorded for `request`, if any.
+    /// 为 `request` 录制的工具结果（若有）。
     pub fn lookup_tools(
         &self,
         request: &GenerationRequest,
@@ -113,20 +110,19 @@ impl Journal {
             .map(|record| (record.results.clone(), record.refused))
     }
 
-    /// How many distinct requests have a recorded model response.
+    /// 有多少个不同请求拥有已录制的模型响应。
     pub fn len(&self) -> usize {
         self.entries.lock().expect("journal lock").len()
     }
 
-    /// Whether nothing has been recorded.
+    /// 是否尚未录制任何内容。
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Serialize the whole journal to bytes, so a recording can be persisted and
-    /// replayed in another process. The bytes are self-contained: the fingerprint
-    /// keys travel with the responses, so [`Journal::from_bytes`] needs nothing
-    /// else to replay the run.
+    /// 把整个日志序列化为字节，使一次录制可被持久化并在
+    /// 另一进程中回放。字节是自包含的：指纹键随响应一起传输，
+    /// 因此 [`Journal::from_bytes`] 无需其他东西即可回放该运行。
     pub fn to_bytes(&self) -> serde_json::Result<Vec<u8>> {
         let entries: BTreeMap<String, GenerationResponse> = self
             .entries
@@ -145,9 +141,9 @@ impl Journal {
         serde_json::to_vec(&JournalData { entries, tools })
     }
 
-    /// Rebuild a journal from [`Journal::to_bytes`] output. The result shares no
-    /// state with the journal that produced the bytes, exactly as a second
-    /// process loading the recording from disk would.
+    /// 从 [`Journal::to_bytes`] 的输出重建一个日志。结果与产出
+    /// 这些字节的日志不共享任何状态，正如第二个进程从磁盘
+    /// 加载该录制一样。
     pub fn from_bytes(bytes: &[u8]) -> serde_json::Result<Self> {
         let data: JournalData = serde_json::from_slice(bytes)?;
         Ok(Self {
@@ -157,9 +153,9 @@ impl Journal {
         })
     }
 
-    /// Persist the journal to a file so a recording can be replayed in another
-    /// process. A thin wrapper over [`Journal::to_bytes`]; serialization errors
-    /// surface as [`std::io::ErrorKind::InvalidData`].
+    /// 把日志持久化到文件，使一次录制可在另一进程中回放。
+    /// 对 [`Journal::to_bytes`] 的薄包装；序列化错误以
+    /// [`std::io::ErrorKind::InvalidData`] 浮现。
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         let bytes = self
             .to_bytes()
@@ -167,15 +163,15 @@ impl Journal {
         std::fs::write(path, bytes)
     }
 
-    /// Load a journal written by [`Journal::save`]. The result shares no state
-    /// with the recorder, exactly as a second process reading the file would.
+    /// 加载由 [`Journal::save`] 写出的日志。结果与录制者不共享
+    /// 任何状态，正如第二个进程读取该文件一样。
     pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let bytes = std::fs::read(path)?;
         Self::from_bytes(&bytes)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }
 
-    /// Remember a parked approval so its resume can journal the full round.
+    /// 记住一个挂起的审批，使其恢复能把整轮记入日志。
     pub(crate) fn record_pending(
         &self,
         key: String,
@@ -193,7 +189,7 @@ impl Journal {
         );
     }
 
-    /// Take the parked approval for `key`, if this journal recorded one.
+    /// 取出 `key` 的挂起审批（若本日志录制过一个）。
     pub(crate) fn take_pending(
         &self,
         key: &str,
@@ -206,17 +202,16 @@ impl Journal {
     }
 }
 
-/// A stable key for a parked approval: the agent, the generation turn that
-/// raised it, and the call id. The turn is the correlation's (the model call's),
-/// not the resume's turn count, so every approval in one round shares a turn.
+/// 挂起审批的稳定键：智能体、发起它的生成轮，以及调用 id。
+/// 轮是关联标识的轮（模型调用的），而非恢复的轮计数，
+/// 因此一轮中的每个审批共享同一个轮。
 pub(crate) fn approval_key(agent: &str, turn: usize, call_id: &str) -> String {
     format!("{agent}:{turn}:{call_id}")
 }
 
-/// A stable key for a request: its correlation (when present), its messages,
-/// and its tool descriptors sorted by name so descriptor order cannot change the
-/// key. The model name is deliberately excluded (see the module docs). The
-/// correlation keeps two agents issuing identical requests apart.
+/// 请求的稳定键：其关联标识（存在时）、其消息，以及按名字
+/// 排序的工具描述符，使描述符顺序无法改变键。模型名被刻意
+/// 排除（见模块文档）。关联标识把发出相同请求的两个智能体分开。
 fn fingerprint(request: &GenerationRequest) -> String {
     let mut tools = request.tools.clone();
     tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -228,16 +223,16 @@ fn fingerprint(request: &GenerationRequest) -> String {
     .to_string()
 }
 
-/// A provider that answers from a [`Journal`] instead of a live model.
+/// 从 [`Journal`] 而非实时模型作答的提供方。
 ///
-/// A request with no recorded response is an error, not a silent fallback: a
-/// replay that drifts from the recording should fail loudly.
+/// 没有已录制响应的请求是一个错误，而非静默回退：
+/// 偏离录制的回放应当响亮地失败。
 pub struct ReplayProvider {
     journal: Journal,
 }
 
 impl ReplayProvider {
-    /// Replay from `journal`.
+    /// 从 `journal` 回放。
     pub fn new(journal: Journal) -> Self {
         Self { journal }
     }

@@ -1,4 +1,4 @@
-//! Schedules: ordered stages of systems, with concurrency inside a stage.
+//! 调度器：系统的有序阶段，阶段内部可并发。
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -10,21 +10,20 @@ use crate::error::{ScheduleError, SystemError};
 use crate::system::{Period, System, SystemFuture, run_guarded};
 use crate::work::Work;
 
-/// A system plus the metadata the scheduler needs.
+/// 一个系统加上调度器所需的元数据。
 pub struct SystemSpec {
-    /// Unique label, used for ordering hints and error reports.
+    /// 唯一标签，用于排序提示与错误报告。
     pub label: Cow<'static, str>,
-    /// The system itself.
+    /// 系统本身。
     pub system: Box<dyn System>,
-    /// Effective world access (a copy of the system's declaration unless
-    /// overridden).
+    /// 生效的世界访问权限（除非被覆盖，否则是系统声明的副本）。
     pub access: Access,
-    /// Cadence override.
+    /// 节奏覆盖。
     pub period: Option<Period>,
 }
 
 impl SystemSpec {
-    /// Takes any concrete system, reading its own name and access.
+    /// 接受任意具体系统，读取它自己的名称与访问权限。
     pub fn new<S: System + 'static>(label: impl Into<Cow<'static, str>>, system: S) -> Self {
         let access = system.access();
         let period = system.period();
@@ -36,7 +35,7 @@ impl SystemSpec {
         }
     }
 
-    /// Wraps an already boxed system.
+    /// 包装一个已装箱的系统。
     pub fn boxed(label: impl Into<Cow<'static, str>>, system: Box<dyn System>) -> Self {
         let access = system.access();
         let period = system.period();
@@ -48,47 +47,47 @@ impl SystemSpec {
         }
     }
 
-    /// Overrides the access declaration, e.g. to force exclusivity.
+    /// 覆盖访问权限声明，例如强制独占。
     pub fn with_access(mut self, access: Access) -> Self {
         self.access = access;
         self
     }
 
-    /// Adds a declared read.
+    /// 添加一个声明的读取。
     pub fn reads<T: 'static>(mut self) -> Self {
         self.access = self.access.and_read::<T>();
         self
     }
 
-    /// Adds a declared write.
+    /// 添加一个声明的写入。
     pub fn writes<T: 'static>(mut self) -> Self {
         self.access = self.access.and_write::<T>();
         self
     }
 
-    /// Declares the system as a pure reader.
+    /// 将系统声明为纯读者。
     pub fn read_only(mut self) -> Self {
         self.access = Access::read_only();
         self
     }
 
-    /// Sets the cadence.
+    /// 设置节奏。
     pub fn every(mut self, period: Period) -> Self {
         self.period = Some(period);
         self
     }
 
-    /// Millisecond cadence.
+    /// 毫秒节奏。
     pub fn every_millis(self, millis: u64) -> Self {
         self.every(Period::Time(Duration::from_millis(millis)))
     }
 
-    /// Frame-count cadence.
+    /// 帧数节奏。
     pub fn every_frames(self, frames: u64) -> Self {
         self.every(Period::Frames(frames))
     }
 
-    /// Label of the system.
+    /// 系统的标签。
     pub fn name(&self) -> &str {
         &self.label
     }
@@ -104,27 +103,27 @@ impl std::fmt::Debug for SystemSpec {
     }
 }
 
-/// One step of a schedule: a sequential pipeline or a concurrent group.
+/// 调度器的一个步骤：顺序流水线或并发组。
 #[derive(Debug)]
 pub enum Stage {
-    /// Systems run one after another, in order.
+    /// 系统按顺序一个接一个运行。
     Sequential(Vec<SystemSpec>),
-    /// Systems run at the same time; all access declarations must be compatible.
+    /// 系统同时运行；所有访问权限声明必须兼容。
     Parallel {
-        /// Name of the group.
+        /// 组的名称。
         name: Cow<'static, str>,
-        /// Members of the group.
+        /// 组的成员。
         systems: Vec<SystemSpec>,
     },
 }
 
 impl Stage {
-    /// Sequential stage from any iterator of specs.
+    /// 由任意 spec 迭代器构建顺序阶段。
     pub fn sequential<I: IntoIterator<Item = SystemSpec>>(specs: I) -> Self {
         Self::Sequential(specs.into_iter().collect())
     }
 
-    /// Concurrent stage.
+    /// 并发阶段。
     pub fn parallel(name: impl Into<Cow<'static, str>>, specs: Vec<SystemSpec>) -> Self {
         Self::Parallel {
             name: name.into(),
@@ -132,7 +131,7 @@ impl Stage {
         }
     }
 
-    /// Members of the stage.
+    /// 阶段的成员。
     pub fn systems(&self) -> &[SystemSpec] {
         match self {
             Self::Sequential(specs) => specs,
@@ -140,7 +139,7 @@ impl Stage {
         }
     }
 
-    /// Mutable members of the stage.
+    /// 阶段的可变成员。
     pub fn systems_mut(&mut self) -> &mut Vec<SystemSpec> {
         match self {
             Self::Sequential(specs) => specs,
@@ -148,7 +147,7 @@ impl Stage {
         }
     }
 
-    /// Stage name: the first label, or the parallel group name.
+    /// 阶段名称：第一个标签，或并行组的名称。
     pub fn name(&self) -> &str {
         match self {
             Self::Sequential(specs) => specs.first().map_or("empty", |spec| &spec.label),
@@ -156,28 +155,27 @@ impl Stage {
         }
     }
 
-    /// `true` for a concurrent stage.
+    /// 并发阶段时为 `true`。
     pub fn is_parallel(&self) -> bool {
         matches!(self, Self::Parallel { .. })
     }
 
-    /// Number of systems in the stage.
+    /// 阶段中系统的数量。
     pub fn len(&self) -> usize {
         self.systems().len()
     }
 
-    /// `true` when the stage runs nothing.
+    /// 阶段不运行任何东西时为 `true`。
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 
-/// Ordered systems, executed once per frame by the driver.
+/// 有序的系统，由驱动器每帧执行一次。
 ///
-/// Stages run in sequence; inside a [`Stage::Parallel`] the members are polled
-/// together with `join_all`, so an agent waiting on an LLM response does not
-/// stall the other agents. The scheduler applies the command queue after each
-/// stage, which is the only point where deferred writes become visible.
+/// 各阶段按顺序运行；在 [`Stage::Parallel`] 内部，成员用 `join_all`
+/// 一起轮询，因此等待 LLM 响应的智能体不会拖住其他智能体。
+/// 调度器在每个阶段后应用命令队列，这是延迟写入变得可见的唯一时刻。
 #[derive(Debug, Default)]
 pub struct Schedule {
     stages: Vec<Stage>,
@@ -188,7 +186,7 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    /// Empty schedule that flushes commands after every stage.
+    /// 在每个阶段后刷新命令的空调度器。
     pub fn new() -> Self {
         Self {
             stages: Vec::new(),
@@ -199,29 +197,28 @@ impl Schedule {
         }
     }
 
-    /// Opt in to containing a failing system: it is recorded and skipped for the
-    /// rest of the run instead of aborting every other system and agent. The
-    /// default remains fail-fast, so a bad system still surfaces as an error.
+    /// 选择启用对失败系统的遏制：它被记录并在本次运行的剩余部分被跳过，
+    /// 而不是中止其他每个系统与智能体。默认仍是快速失败，
+    /// 因此坏系统仍会作为错误浮现。
     pub fn isolate_system_errors(&mut self) -> &mut Self {
         self.isolate = true;
         self
     }
 
-    /// Labels of systems that failed and were isolated, in sorted order.
+    /// 失败并被隔离的系统的标签，按排序顺序。
     pub fn failed_labels(&self) -> Vec<String> {
         let mut labels: Vec<String> = self.failed.iter().cloned().collect();
         labels.sort();
         labels
     }
 
-    /// Disables the automatic command flush at stage boundaries (the driver then
-    /// owns that step).
+    /// 禁用在阶段边界的自动命令刷新（此后由驱动器负责该步骤）。
     pub fn without_command_flush(mut self) -> Self {
         self.flush_commands = false;
         self
     }
 
-    /// Appends a system to the current sequential stage.
+    /// 向当前顺序阶段追加一个系统。
     pub fn add(&mut self, spec: SystemSpec) -> &mut Self {
         let label = spec.label.clone();
         match self.stages.last_mut() {
@@ -232,7 +229,7 @@ impl Schedule {
         self
     }
 
-    /// Appends several systems as one sequential stage.
+    /// 将多个系统作为一个顺序阶段追加。
     pub fn add_all<I: IntoIterator<Item = SystemSpec>>(&mut self, specs: I) -> &mut Self {
         let stage = Stage::sequential(specs);
         if !stage.is_empty() {
@@ -241,7 +238,7 @@ impl Schedule {
         self
     }
 
-    /// Appends a concurrent stage, rejecting conflicting access declarations.
+    /// 追加一个并发阶段，拒绝冲突的访问权限声明。
     pub fn parallel<I: IntoIterator<Item = SystemSpec>>(
         &mut self,
         name: impl Into<Cow<'static, str>>,
@@ -269,7 +266,7 @@ impl Schedule {
         Ok(self)
     }
 
-    /// Inserts a system right before `label`.
+    /// 在 `label` 正前方插入一个系统。
     pub fn insert_before(
         &mut self,
         label: &str,
@@ -280,7 +277,7 @@ impl Schedule {
         Ok(self)
     }
 
-    /// Inserts a system right after `label`.
+    /// 在 `label` 正后方插入一个系统。
     pub fn insert_after(
         &mut self,
         label: &str,
@@ -291,7 +288,7 @@ impl Schedule {
         Ok(self)
     }
 
-    /// `(stage index, index inside the stage)` of a label.
+    /// 某标签的 `(阶段索引, 阶段内索引)`。
     fn locate(&self, label: &str) -> Result<(usize, usize), ScheduleError> {
         for (stage_index, stage) in self.stages.iter().enumerate() {
             if let Some(offset) = stage
@@ -307,22 +304,22 @@ impl Schedule {
         })
     }
 
-    /// Stages of this schedule.
+    /// 此调度器的各阶段。
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
 
-    /// `true` when nothing is scheduled.
+    /// 没有调度任何东西时为 `true`。
     pub fn is_empty(&self) -> bool {
         self.stages.iter().all(Stage::is_empty)
     }
 
-    /// Number of scheduled systems.
+    /// 已调度系统的数量。
     pub fn len(&self) -> usize {
         self.stages.iter().map(Stage::len).sum()
     }
 
-    /// Labels in execution order.
+    /// 按执行顺序的标签。
     pub fn labels(&self) -> Vec<Cow<'static, str>> {
         self.stages
             .iter()
@@ -331,20 +328,20 @@ impl Schedule {
             .collect()
     }
 
-    /// Appends every stage of `other`.
+    /// 追加 `other` 的每个阶段。
     pub fn merge(&mut self, other: Schedule) -> &mut Self {
         self.stages.extend(other.stages);
         self
     }
 
-    /// Removes every stage and cadence timestamp.
+    /// 移除每个阶段与节奏时间戳。
     pub fn clear(&mut self) -> &mut Self {
         self.stages.clear();
         self.last_run.clear();
         self
     }
 
-    /// Fails on duplicate labels, empty stages and parallel conflicts.
+    /// 遇到重复标签、空阶段与并行冲突时失败。
     pub fn validate(&self) -> Result<(), ScheduleError> {
         let mut seen: HashMap<&str, usize> = HashMap::new();
         for (stage_index, stage) in self.stages.iter().enumerate() {
@@ -378,7 +375,7 @@ impl Schedule {
         Ok(())
     }
 
-    /// Runs every due system, then flushes queued commands.
+    /// 运行每个到期的系统，然后刷新排队的命令。
     pub async fn execute(&mut self, ctx: &SystemContext) -> Result<(), SystemError> {
         let frame = ctx.frame_number();
         tracing::debug!(frame, stages = self.stages.len(), "executing schedule");
@@ -409,9 +406,9 @@ impl Schedule {
                     }
                 }
                 Stage::Parallel { systems, .. } => {
-                    // The due check runs first so every system borrow below is a
-                    // single disjoint `&mut` per element, which is what lets the
-                    // futures coexist in one `join_all`.
+                    // 到期检查先运行，使下面每个系统借用都是每元素一个
+                    // 不相交的 `&mut`，这正是让各 future 能在一个
+                    // `join_all` 中共存的原因。
                     let flags = cadence(&mut self.last_run, systems, frame);
                     let mut pending: Vec<SystemFuture<'_>> = Vec::new();
                     let mut labels: Vec<Cow<'static, str>> = Vec::new();
@@ -456,18 +453,17 @@ impl Schedule {
     }
 }
 
-/// Release the work a just-isolated system claimed. An isolated system is
-/// skipped for the rest of the run, so it can never settle its own labels; left
-/// claimed they would keep the driver awake until the frame budget. The owner is
-/// the system's `name()`, which is what producers declare and which may differ
-/// from the registration label.
+/// 释放刚被隔离的系统所认领的工作。被隔离的系统在本次运行的剩余部分
+/// 被跳过，因此它再也无法落定自己的标签；若继续认领，它们会让驱动器
+/// 保持唤醒直到帧预算耗尽。所有者是系统的 `name()`，即生产者声明的
+/// 那个名字，它可能与注册标签不同。
 async fn release_work(ctx: &SystemContext, owner: &str) {
     ctx.with_world_mut(|world| Work::ensure(world).release_owner(owner))
         .await;
 }
 
-/// Flags every member of a stage that is due on this frame, stamping the ones
-/// that run. Takes the map directly so the caller keeps its stage borrow.
+/// 标记阶段中在本帧到期的每个成员，并为运行的那些打上时间戳。
+/// 直接接收该映射，使调用者保持其阶段借用。
 fn cadence(
     last_run: &mut HashMap<Cow<'static, str>, tokio::time::Instant>,
     specs: &[SystemSpec],
@@ -479,7 +475,7 @@ fn cadence(
         .collect()
 }
 
-/// Cadence gate for one system.
+/// 单个系统的节奏门控。
 fn due(
     last_run: &mut HashMap<Cow<'static, str>, tokio::time::Instant>,
     label: &str,
@@ -516,8 +512,7 @@ fn last_run_key(last_run: &HashMap<Cow<'static, str>, tokio::time::Instant>, lab
         .unwrap_or_else(|| Cow::Owned(label.to_string()))
 }
 
-/// A schedule that runs a fixed set of systems once, useful in tests and in
-/// one-shot pipelines.
+/// 将一组固定系统运行一次的调度器，便于用于测试与一次性流水线。
 pub fn one_shot<I: IntoIterator<Item = SystemSpec>>(specs: I) -> Schedule {
     let mut schedule = Schedule::new();
     schedule.add_all(specs);
@@ -573,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_members_wait_for_each_other() {
-        // A barrier of 2 only resolves when both systems are polled concurrently.
+        // 只有当两个系统被并发轮询时，2 的屏障才会解除。
         let gate = Arc::new(tokio::sync::Barrier::new(2));
         let mut schedule = Schedule::new();
         let specs = ["left", "right"].map(|name| {
@@ -595,7 +590,7 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(2), schedule.execute(&ctx)).await;
         result.expect("read-only systems run concurrently").unwrap();
 
-        // the same pair, declared exclusive, must be refused up front
+        // 同一对系统，声明为独占，必须在一开始就被拒绝
         let mut strict = Schedule::new();
         let error = strict
             .parallel(
@@ -637,21 +632,21 @@ mod tests {
         schedule.add(counting("slow", counter.clone(), Access::empty()).every_millis(40));
 
         let ctx = SystemContext::new(WorldHandle::empty());
-        // frame 0: both due
+        // 帧 0：两者都到期
         schedule.execute(&ctx).await.unwrap();
         assert_eq!(counter.load(Ordering::Relaxed), 2);
-        // frame 1: only the 2-frame cadence is skipped, the timer is not due yet
+        // 帧 1：只有 2 帧节奏被跳过，计时器尚未到期
         ctx.advance_frame();
         counter.store(0, Ordering::Relaxed);
         schedule.execute(&ctx).await.unwrap();
         assert_eq!(counter.load(Ordering::Relaxed), 0);
-        // after the time window both are due again: frame 2 matches the 2-frame
-        // cadence and 60ms exceeds the 40ms period
+        // 时间窗口过后两者再次到期：帧 2 匹配 2 帧节奏，
+        // 且 60ms 超过 40ms 周期
         tokio::time::sleep(Duration::from_millis(60)).await;
         ctx.advance_frame();
         schedule.execute(&ctx).await.unwrap();
         assert_eq!(counter.load(Ordering::Relaxed), 2);
-        // frame 3 skips the 2-frame system, the timer is not due yet
+        // 帧 3 跳过 2 帧系统，计时器尚未到期
         counter.store(0, Ordering::Relaxed);
         ctx.advance_frame();
         schedule.execute(&ctx).await.unwrap();
@@ -703,7 +698,7 @@ mod tests {
         assert_eq!(healthy.load(Ordering::Relaxed), 1, "the healthy member still ran");
         assert_eq!(schedule.failed_labels(), vec!["boom".to_string()]);
 
-        // The failed member is skipped on later frames, the healthy one keeps running.
+        // 失败的成员在后续帧被跳过，健康的成员继续运行。
         ctx.advance_frame();
         schedule.execute(&ctx).await.unwrap();
         assert_eq!(healthy.load(Ordering::Relaxed), 2);

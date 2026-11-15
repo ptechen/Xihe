@@ -1,25 +1,22 @@
-//! Tools: the only way an agent changes anything outside its own context.
+//! 工具：智能体改变其自身上下文之外任何事物的唯一途径。
 //!
-//! A [`Tool`] is described to the model by a [`ToolDescriptor`] (its name,
-//! description and argument schema) and invoked by name with a [`ToolCall`].
-//! The registry is a world resource, so every agent shares one set of
-//! capabilities, while per-agent policy — which tools an agent may use, which
-//! need a human — lives in [`crate::guardrail`] and [`crate::hitl`], not here.
+//! [`Tool`] 由 [`ToolDescriptor`]（其名字、描述与参数 schema）
+//! 向模型描述，并以 [`ToolCall`] 按名字调用。注册表是一个世界资源，
+//! 因此每个智能体共享同一组能力，而每智能体策略——一个智能体可用
+//! 哪些工具、哪些需要人——住在 [`crate::guardrail`] 与 [`crate::hitl`]，
+//! 而非这里。
 //!
-//! Two rules keep the loop trustworthy:
+//! 两条规则保持循环可信：
 //!
-//!   * A tool answers with a [`ToolOutcome`], never an `Err`, because "no rows
-//!     matched" is *information for the model*: it goes back into the transcript
-//!     as a tool result and the model decides what to do next. The registry
-//!     enforces this even for a tool that panics, catching the unwind and
-//!     returning an error outcome so one buggy tool cannot abort the schedule.
-//!     Only the registry reports an [`AgentError`](crate::error::AgentError),
-//!     and only for a call that was never dispatched — an unregistered name.
-//!   * A tool gets a [`ToolContext`], never the world. Tools run while the
-//!     ReAct system holds no world lock; handing the lock to arbitrary tool
-//!     code would deadlock the apply step against itself. So anything a tool
-//!     needs — the memory store, the clock, the calling entity — is handed
-//!     over explicitly.
+//!   * 工具以 [`ToolOutcome`] 作答，绝不返回 `Err`，因为“没有匹配的行”
+//!     是*给模型的信息*：它作为工具结果回到转录中，由模型决定下一步。
+//!     即便工具 panic，注册表也强制执行这一点——捕获 unwind 并返回
+//!     一个错误结果，使一个有 bug 的工具无法中止调度。只有注册表报告
+//!     [`AgentError`](crate::error::AgentError)，且仅针对从未被分派的调用——
+//!     一个未注册的名字。
+//!   * 工具获得 [`ToolContext`]，绝不获得世界。工具在 ReAct 系统不持有
+//!     世界锁时运行；把锁交给任意工具代码会使 apply 步骤与自身死锁。
+//!     因此工具所需的一切——记忆存储、时钟、调用实体——都被显式递交。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,18 +29,18 @@ use xihe_llm::{ToolCall, ToolDescriptor};
 
 use crate::error::AgentError;
 
-/// What the calling agent is and what it can reach.
+/// 调用智能体是什么、它能触及什么。
 #[derive(Clone)]
 pub struct ToolContext {
-    /// The agent entity that asked for this call.
+    /// 请求此调用的智能体实体。
     pub agent: Entity,
-    /// Conversation the call belongs to, when the agent has one.
+    /// 调用所属的对话，当智能体有一个时。
     pub session: Option<String>,
-    /// Turn number inside that conversation, counting from one.
+    /// 该对话内的轮号，从一开始计数。
     pub turn: u64,
-    /// Shared memory store, when the run was given one.
+    /// 共享记忆存储，当运行被赋予一个时。
     pub store: Option<Arc<dyn xihe_memory::MemoryStore>>,
-    /// Arbitrary per-run values a harness wants to hand to its own tools.
+    /// 框架想交给其自有工具的任意每运行值。
     pub extras: BTreeMap<String, Value>,
 }
 
@@ -60,7 +57,7 @@ impl std::fmt::Debug for ToolContext {
 }
 
 impl ToolContext {
-    /// A context for one agent, with no store attached.
+    /// 一个智能体的上下文，未附加存储。
     pub fn new(agent: Entity) -> Self {
         Self {
             agent,
@@ -71,49 +68,49 @@ impl ToolContext {
         }
     }
 
-/// Name the conversation the call was made in.
+/// 命名发起调用的对话。
     pub fn with_session(mut self, session: impl Into<String>) -> Self {
         self.session = Some(session.into());
         self
     }
 
-/// Set the turn number.
+/// 设置轮号。
     pub fn with_turn(mut self, turn: u64) -> Self {
         self.turn = turn;
         self
     }
 
-/// Give the tool access to shared memory.
+/// 给工具访问共享记忆的能力。
     pub fn with_store(mut self, store: Arc<dyn xihe_memory::MemoryStore>) -> Self {
         self.store = Some(store);
         self
     }
 
-    /// Attach a named value, e.g. a file handle for a sandboxed tool.
+    /// 附加一个命名值，例如沙箱化工具的文件句柄。
     pub fn with_extra(mut self, key: impl Into<String>, value: Value) -> Self {
         self.extras.insert(key.into(), value);
         self
     }
 
-/// Read an extra attached by the agent.
+/// 读取智能体附加的一个 extra。
     pub fn extra(&self, key: &str) -> Option<&Value> {
         self.extras.get(key)
     }
 }
 
-/// The result of running a tool.
+/// 运行一个工具的结果。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutcome {
-    /// False when the tool ran and reported a problem.
+    /// 当工具运行并报告了一个问题时为 false。
     pub ok: bool,
-    /// Structured payload returned to the caller of the loop.
+    /// 返回给循环调用者的结构化载荷。
     pub payload: Value,
-    /// Text the model reads; must be enough on its own to decide the next step.
+    /// 模型读取的文本；必须足以独立决定下一步。
     pub text: String,
 }
 
 impl ToolOutcome {
-    /// A successful call.
+    /// 一次成功的调用。
     pub fn ok(payload: Value, text: impl Into<String>) -> Self {
         Self {
             ok: true,
@@ -122,8 +119,8 @@ impl ToolOutcome {
         }
     }
 
-    /// A successful call whose result is only text.
-/// A successful call whose result is only text.
+    /// 结果仅为文本的成功调用。
+/// 结果仅为文本的成功调用。
     pub fn text(text: impl Into<String>) -> Self {
         let text = text.into();
         Self {
@@ -133,7 +130,7 @@ impl ToolOutcome {
         }
     }
 
-    /// A call that ran and reported a problem, e.g. "no rows matched".
+    /// 一次运行并报告了问题的调用，例如“没有匹配的行”。
     pub fn error(text: impl Into<String>) -> Self {
         let text = text.into();
         Self {
@@ -143,7 +140,7 @@ impl ToolOutcome {
         }
     }
 
-    /// A call that was not performed because it needs a human.
+    /// 因需要人而未执行的调用。
     pub fn awaiting_approval(text: impl Into<String>) -> Self {
         let text = text.into();
         Self {
@@ -153,7 +150,7 @@ impl ToolOutcome {
         }
     }
 
-    /// The message written back into the transcript as the tool result.
+    /// 作为工具结果写回转录的消息。
     pub fn transcript_text(&self) -> String {
         if self.ok {
             self.text.clone()
@@ -162,7 +159,7 @@ impl ToolOutcome {
         }
     }
 
-    /// True when the call was parked for a human rather than executed.
+    /// 当调用为人挂起而非执行时为真。
     pub fn is_approval_request(&self) -> bool {
         self.payload
             .get("approval_required")
@@ -171,88 +168,87 @@ impl ToolOutcome {
     }
 }
 
-/// One capability the model may ask for.
+/// 模型可请求的一项能力。
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
-    /// Name, description and argument schema as sent to the provider.
+    /// 发送给提供方时的名字、描述与参数 schema。
     fn descriptor(&self) -> ToolDescriptor;
 
-    /// Run the call. Implementations return [`ToolOutcome::error`] rather than
-    /// an `Err` for anything the model could react to.
+    /// 运行该调用。对模型可回应的任何事，实现返回
+    /// [`ToolOutcome::error`] 而非 `Err`。
     async fn run(&self, ctx: &ToolContext, call: &ToolCall) -> ToolOutcome;
 
-    /// Ask a human before running. See [`crate::hitl`].
+    /// 运行前询问人。见 [`crate::hitl`]。
     fn requires_approval(&self) -> bool {
         false
     }
 
-    /// Whether the tool only reads and can safely run alongside other calls.
+    /// 工具是否只读、可与其他调用安全地并行运行。
     ///
-    /// When every call in a batch is readonly, the loop executes them
-    /// concurrently instead of sequentially.
+    /// 当一个批次中的每个调用都只读时，循环并发而非顺序执行它们。
     fn readonly(&self) -> bool {
         false
     }
 
-    /// The tool's name, taken from its descriptor.
+    /// 工具的名字，取自其描述符。
     fn name(&self) -> String {
         self.descriptor().name
     }
 }
 
-/// Name-indexed tools, shared as a world resource.
+/// 按名字索引的工具，作为世界资源共享。
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
-/// An empty registry.
+/// 一个空注册表。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Add a tool, replacing an earlier one of the same name.
+    /// 添加一个工具，替换同名的较早者。
     pub fn register<T: Tool>(&mut self, tool: T) -> Option<Arc<dyn Tool>> {
         self.tools.insert(tool.name(), Arc::new(tool))
     }
 
-    /// Add a tool behind a shared handle, for registries built at runtime.
+    /// 在共享句柄之后添加一个工具，用于运行时构建的注册表。
     pub fn register_arc(&mut self, tool: Arc<dyn Tool>) -> Option<Arc<dyn Tool>> {
         self.tools.insert(tool.name(), tool)
     }
 
-/// Remove a tool, returning it if it was registered.
+/// 移除一个工具，若已注册则返回它。
     pub fn unregister(&mut self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.remove(name)
     }
 
-/// The tool registered under `name`.
+/// 注册在 `name` 下的工具。
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.tools.get(name)
     }
 
-/// Whether `name` is registered.
+/// `name` 是否已注册。
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }
 
-    /// Names in sorted order, so error messages and prompts are stable.
+    /// 按排序顺序的名字，使错误消息与提示词稳定。
     pub fn names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
     }
 
-/// How many tools are registered.
+/// 注册了多少工具。
     pub fn len(&self) -> usize {
         self.tools.len()
     }
 
-/// Whether nothing is registered.
+/// 是否未注册任何工具。
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
 
-    /// Descriptors for every registered tool, ordered by name.
+    /// 每个已注册工具的描述符，按名字排序。
     pub fn descriptors(&self) -> Vec<ToolDescriptor> {
         let mut list: Vec<ToolDescriptor> = self
             .tools
@@ -263,11 +259,10 @@ impl ToolRegistry {
         list
     }
 
-    /// Descriptors restricted to an allowlist, in the allowlist's order.
+    /// 限制到允许列表的描述符，按允许列表的顺序。
     ///
-    /// Unknown names are skipped rather than reported: an allowlist that
-    /// mentions a tool the build does not have should shrink what the model can
-    /// ask for, not stop the run.
+    /// 未知名字被跳过而非报告：一个提到构建所没有之工具的
+    /// 允许列表，应当缩减模型可请求的范围，而非停止运行。
     pub fn descriptors_for(&self, allow: &[String]) -> Vec<ToolDescriptor> {
         allow
             .iter()
@@ -276,17 +271,17 @@ impl ToolRegistry {
             .collect()
     }
 
-/// Whether a call to `name` must be approved before running.
+/// 对 `name` 的调用是否必须在运行前被批准。
     pub fn requires_approval(&self, name: &str) -> bool {
         self.tools.get(name).is_some_and(|tool| tool.requires_approval())
     }
 
-    /// Whether the named tool declared itself read-only.
+    /// 命名工具是否声明自己只读。
     pub fn is_readonly(&self, name: &str) -> bool {
         self.tools.get(name).is_some_and(|tool| tool.readonly())
     }
 
-    /// Names of the tools that ask for a human, for prompts and logs.
+    /// 请求人的工具的名字，用于提示词与日志。
     pub fn approval_required(&self) -> Vec<String> {
         self.tools
             .iter()
@@ -295,15 +290,15 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Run one call by name.
+    /// 按名字运行一次调用。
     ///
-    /// An unknown name is a harness error, not something to send back to the
-    /// model as text: the model cannot use a tool it was never shown, so this
-    /// means the registry changed underneath it.
+    /// 未知名字是框架错误，而非作为文本发回给模型之物：
+    /// 模型无法使用它从未见过的工具，因此这意味着注册表
+    /// 在它底下变了。
     ///
-    /// A tool that panics is caught here and turned into an error
-    /// [`ToolOutcome`], so one buggy tool cannot abort the schedule. The model
-    /// sees the failure as a tool result and decides what to do next.
+    /// panic 的工具在这里被捕获并变成一个错误 [`ToolOutcome`]，
+    /// 使一个有 bug 的工具无法中止调度。模型把失败看作工具结果，
+    /// 并决定下一步。
     pub async fn execute(&self, ctx: &ToolContext, call: &ToolCall) -> Result<ToolOutcome, AgentError> {
         let tool = self.tools.get(&call.name).ok_or_else(|| AgentError::UnknownTool {
             name: call.name.clone(),
@@ -320,12 +315,10 @@ impl ToolRegistry {
         Ok(outcome)
     }
 
-    /// Validate the arguments a model produced against the tool's schema.
+    /// 针对工具的 schema 校验模型产出的参数。
     ///
-    /// Returns the list of problems, empty when the call is well-formed. The
-    /// loop sends these back to the model instead of running the tool, since a
-    /// call missing its required argument would fail in a way the model cannot
-    /// see.
+    /// 返回问题列表，调用良构时为空。循环把这些发回给模型
+    /// 而非运行工具，因为缺少必需参数的调用会以模型看不到的方式失败。
     pub fn validate(&self, call: &ToolCall) -> Vec<String> {
         let Some(tool) = self.tools.get(&call.name) else {
             return vec![format!("unknown tool `{}`", call.name)];
@@ -373,7 +366,7 @@ impl std::fmt::Debug for ToolRegistry {
     }
 }
 
-/// A tool defined by a closure, for tests and one-off capabilities.
+/// 由闭包定义的工具，用于测试与一次性能力。
 pub struct FnTool {
     descriptor: ToolDescriptor,
     approval: bool,
@@ -382,7 +375,7 @@ pub struct FnTool {
 }
 
 impl FnTool {
-    /// A tool whose result is computed synchronously from its arguments.
+    /// 结果由其参数同步计算的工具。
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -396,25 +389,25 @@ impl FnTool {
         }
     }
 
-    /// Attach the argument schema.
+    /// 附加参数 schema。
     pub fn with_parameters(mut self, schema: Value) -> Self {
         self.descriptor = self.descriptor.with_parameters(schema);
         self
     }
 
-    /// Require an argument named `key`.
+    /// 要求一个名为 `key` 的参数。
     pub fn with_required_string(mut self, key: &str, description: &str) -> Self {
         self.descriptor = self.descriptor.with_required_string(key, description);
         self
     }
 
-    /// Ask a human before running.
+    /// 运行前询问人。
     pub fn requiring_approval(mut self) -> Self {
         self.approval = true;
         self
     }
 
-    /// Declare the tool read-only so batches of it can run concurrently.
+    /// 声明工具只读，使其批次可并发运行。
     pub fn with_readonly(mut self) -> Self {
         self.readonly = true;
         self
@@ -440,7 +433,7 @@ impl Tool for FnTool {
     }
 }
 
-/// `echo` — returns its argument. The smallest tool that exercises the loop.
+/// `echo`——返回其参数。演练循环的最小工具。
 pub struct EchoTool;
 
 #[async_trait]
@@ -462,13 +455,13 @@ impl Tool for EchoTool {
     }
 }
 
-/// `lookup` — answers from a fixed table, standing in for a real data source.
+/// `lookup`——从固定表作答，充当真实数据源的替身。
 pub struct LookupTool {
     table: BTreeMap<String, String>,
 }
 
 impl LookupTool {
-/// Build the table from pairs.
+/// 从键值对构建表。
     pub fn new(entries: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
         Self {
             table: entries
@@ -504,13 +497,13 @@ impl Tool for LookupTool {
     }
 }
 
-/// A clock a tool can read, so tests are not at the mercy of the wall clock.
+/// 工具可读取的时钟，使测试不受墙钟摆布。
 pub trait Clock: Send + Sync + 'static {
-    /// Whole seconds since the Unix epoch.
+    /// 自 Unix 纪元以来的整秒数。
     fn now(&self) -> i64;
 }
 
-/// The real clock.
+/// 真实时钟。
 pub struct SystemClock;
 
 impl Clock for SystemClock {
@@ -522,15 +515,14 @@ impl Clock for SystemClock {
     }
 }
 
-/// A clock that reads one value and moves by `step` every call, for prompts
-/// that must be reproducible.
+/// 读取一个值、每次调用前进 `step` 的时钟，用于必须可复现的提示词。
 pub struct FixedClock {
     value: std::sync::Mutex<i64>,
     step: i64,
 }
 
 impl FixedClock {
-/// Start the clock at `value`.
+/// 把时钟起始于 `value`。
     pub fn new(value: i64) -> Self {
         Self {
             value: std::sync::Mutex::new(value),
@@ -538,7 +530,7 @@ impl FixedClock {
         }
     }
 
-/// Advance by `step` seconds on every read.
+/// 每次读取前进 `step` 秒。
     pub fn with_step(mut self, step: i64) -> Self {
         self.step = step;
         self
@@ -560,19 +552,19 @@ impl Clock for FixedClock {
     }
 }
 
-/// `now` — the current unix time, as a demonstration of a side-effect-free
-/// tool whose result the model cannot compute itself.
+/// `now`——当前 unix 时间，作为一个无副作用工具的演示，
+/// 其结果模型无法自行计算。
 pub struct NowTool {
     clock: Arc<dyn Clock>,
 }
 
 impl NowTool {
-    /// Read the real system clock.
+    /// 读取真实系统时钟。
     pub fn new() -> Self {
         Self::with_clock(Arc::new(SystemClock))
     }
 
-/// Read time from an injected clock.
+/// 从注入的时钟读取时间。
     pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self { clock }
     }
@@ -682,7 +674,7 @@ mod tests {
         assert!(!outcome.ok);
         assert!(outcome.text.contains("panicked"), "{}", outcome.text);
 
-        // the registry is unharmed: a well-behaved tool still runs afterwards
+        // 注册表毫发无损：一个守规矩的工具之后仍能运行
         let echo = registry
             .execute(&ctx, &call("echo", json!({"text": "hi"})))
             .await

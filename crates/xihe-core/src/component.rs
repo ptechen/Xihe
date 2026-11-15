@@ -1,11 +1,11 @@
-//! Component, resource and message marker traits.
+//! 组件、资源与消息的标记 trait。
 
-/// Data attached to an [`Entity`](crate::Entity).
+/// 附着在 [`Entity`](crate::Entity) 上的数据。
 ///
-/// The trait is implemented automatically: every `Send + Sync + 'static` type is
-/// a component, so plain structs and `#[derive]`ed data models need no boilerplate
-/// and no macro import. Keeping the bound `Sync` is what allows read-only systems
-/// to share component storage across concurrently running tokio tasks.
+/// 该 trait 自动实现：任何 `Send + Sync + 'static` 类型都是组件，
+/// 因此普通结构体和 `#[derive]` 的数据模型无需样板代码，也无需导入宏。
+/// 保留 `Sync` 约束，正是为了让只读系统能在并发运行的 tokio 任务间
+/// 共享组件存储。
 ///
 /// ```
 /// use xihe_core::World;
@@ -22,20 +22,19 @@ pub trait Component: Send + Sync + 'static {}
 
 impl<T: Send + Sync + 'static> Component for T {}
 
-/// Shared, singleton state stored in the [`World`](crate::World) instead of on an
-/// entity: provider clients, tool registries, token ledgers, configuration.
+/// 存放在 [`World`](crate::World) 中而非实体上的共享单例状态：
+/// 提供方客户端、工具注册表、token 账本、配置。
 ///
-/// Like [`Component`], this is a blanket marker. A resource must be cheaply
-/// constructible or inserted before first use.
+/// 与 [`Component`] 一样，这是一个全覆盖标记。资源必须能廉价构造，
+/// 或在首次使用前插入。
 pub trait Resource: Send + Sync + 'static {}
 
 impl<T: Send + Sync + 'static> Resource for T {}
 
-/// Payload of the [`Events`](crate::Events) buffer and of the async message bus.
+/// [`Events`](crate::Events) 缓冲区与异步消息总线的载荷。
 ///
-/// Messages are `Clone` because a broadcast may deliver them to several agent
-/// entities per frame; keep payloads small and pass heavy data by
-/// [`Entity`](crate::Entity) handle instead.
+/// 消息是 `Clone` 的，因为一次广播可能在每帧投递给多个智能体实体；
+/// 请保持载荷小巧，重数据改用 [`Entity`](crate::Entity) 句柄传递。
 pub trait Message: Send + Sync + Clone + 'static {}
 
 impl<T: Send + Sync + Clone + 'static> Message for T {}

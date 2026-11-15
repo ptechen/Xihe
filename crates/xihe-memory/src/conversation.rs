@@ -1,4 +1,4 @@
-//! Conversation state: bounded history, prompt assembly and folding.
+//! 对话状态：有界历史、提示词组装与折叠。
 
 use serde::{Deserialize, Serialize};
 use xihe_llm::{ChatMessage, Role, ToolCall};
@@ -6,22 +6,22 @@ use xihe_llm::{ChatMessage, Role, ToolCall};
 use crate::error::MemoryResult;
 use crate::reflection::Summariser;
 
-/// Who spoke a turn, in memory's own vocabulary.
+/// 谁说了某一轮，用记忆自己的词汇。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Speaker {
-    /// The system or persona instruction.
+    /// 系统或人设指令。
     System,
-    /// The human, or an upstream agent posing as one.
+    /// 人类，或冒充人类的上游智能体。
     User,
-    /// The assistant being modelled.
+    /// 被建模的助手。
     Assistant,
-    /// A tool result folded into the dialogue.
+    /// 折叠进对话的工具结果。
     Tool,
 }
 
 impl Speaker {
-    /// The role this speaker maps to when rendering a prompt.
+    /// 渲染提示词时此说话者映射到的角色。
     pub fn role(self) -> Role {
         match self {
             Self::System => Role::System,
@@ -31,7 +31,7 @@ impl Speaker {
         }
     }
 
-    /// The speaker's label in a rendered transcript.
+    /// 渲染后的转录中此说话者的标签。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::System => "system",
@@ -41,7 +41,7 @@ impl Speaker {
         }
     }
 
-    /// Read a role as the matching speaker.
+    /// 把一个角色读作对应的说话者。
     pub fn of_role(role: Role) -> Self {
         match role {
             Role::System => Self::System,
@@ -52,27 +52,27 @@ impl Speaker {
     }
 }
 
-/// One remembered utterance.
+/// 一条被记住的话语。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
-    /// Who said it.
+    /// 谁说的。
     pub speaker: Speaker,
-    /// The text.
+    /// 文本。
     pub content: String,
-    /// Author label, when several speakers share a transcript.
+    /// 作者标签，当多个说话者共享一份转录时。
     #[serde(default)]
     pub author: Option<String>,
-    /// Call id, kept so a tool turn can be matched with its request.
+    /// 调用 id，保留以便工具轮能与其请求匹配。
     #[serde(default)]
     pub call_id: Option<String>,
-    /// Calls an assistant turn asked for, kept so replaying the transcript
-    /// still answers each tool result with the call that produced it.
+    /// 助手轮请求的调用，保留以便回放转录时
+    /// 仍能用产出它的调用应答每个工具结果。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
 }
 
 impl Turn {
-    /// A turn from any speaker.
+    /// 来自任意说话者的一轮。
     pub fn new(speaker: Speaker, content: impl Into<String>) -> Self {
         Self {
             speaker,
@@ -83,17 +83,17 @@ impl Turn {
         }
     }
 
-    /// A user turn.
+    /// 一个用户轮。
     pub fn user(content: impl Into<String>) -> Self {
         Self::new(Speaker::User, content)
     }
 
-    /// An assistant turn.
+    /// 一个助手轮。
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::new(Speaker::Assistant, content)
     }
 
-    /// A tool turn answering `call_id`.
+    /// 应答 `call_id` 的一个工具轮。
     pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             call_id: Some(call_id.into()),
@@ -101,19 +101,19 @@ impl Turn {
         }
     }
 
-    /// Label the author.
+    /// 标注作者。
     pub fn with_author(mut self, author: impl Into<String>) -> Self {
         self.author = Some(author.into());
         self
     }
 
-    /// Attach the calls an assistant turn asked the runtime to execute.
+    /// 附上助手轮请求运行时执行的调用。
     pub fn with_tool_calls(mut self, calls: Vec<ToolCall>) -> Self {
         self.tool_calls = calls;
         self
     }
 
-    /// Convert into a chat message for the provider.
+    /// 转换为给提供方的聊天消息。
     pub fn to_message(&self) -> ChatMessage {
         let mut message = ChatMessage::new(self.speaker.role(), self.content.clone());
         if let Some(author) = &self.author {
@@ -126,7 +126,7 @@ impl Turn {
         message
     }
 
-    /// Build a turn from a chat message.
+    /// 从聊天消息构建一轮。
     pub fn from_message(message: &ChatMessage) -> Self {
         Self {
             speaker: Speaker::of_role(message.role),
@@ -137,7 +137,7 @@ impl Turn {
         }
     }
 
-    /// Rough token size, for budget arithmetic.
+    /// 粗略 token 大小，用于预算算术。
     pub fn tokens(&self) -> usize {
         let mut size = message_size(&self.content, self.author.as_deref());
         for call in &self.tool_calls {
@@ -147,28 +147,28 @@ impl Turn {
     }
 }
 
-/// Token-ish size of a message: characters over four plus per-turn framing.
+/// 消息的类 token 大小：字符数除以四，加上每轮框架开销。
 fn message_size(content: &str, author: Option<&str>) -> usize {
     let chars = content.chars().count() + author.map_or(0, |name| name.chars().count());
     chars.div_ceil(4) + 4
 }
 
-/// Why a window dropped something.
+/// 窗口为何丢弃了某些内容。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrimReason {
-    /// More turns than the window holds.
+    /// 轮数超过窗口所能容纳。
     TooManyTurns,
-    /// The token budget was exceeded.
+    /// 超出 token 预算。
     TooManyTokens,
-    /// Nothing was dropped.
+    /// 没有丢弃任何内容。
     None,
 }
 
-/// A bounded, promotable conversation.
+/// 一个有界、可提升的对话。
 ///
-/// The system prompt and the most recent turns are always kept; when the window
-/// overflows, middle turns are folded into a summary by the configured
-/// [`Summariser`] so nothing important is silently thrown away.
+/// 系统提示词与最近的轮总是保留；当窗口溢出时，中间的轮
+/// 由配置的 [`Summariser`] 折叠为摘要，因此重要内容不会被
+/// 静默丢弃。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConversationWindow {
     #[serde(default)]
@@ -184,7 +184,7 @@ pub struct ConversationWindow {
 }
 
 impl ConversationWindow {
-    /// A window keeping 20 turns inside 4k estimated tokens.
+    /// 一个在 4k 估算 token 内保留 20 轮的窗口。
     pub fn new() -> Self {
         Self {
             system: None,
@@ -197,67 +197,67 @@ impl ConversationWindow {
         }
     }
 
-    /// Set the standing instruction rendered first in every prompt.
+    /// 设置在每个提示词中最先渲染的常驻指令。
     pub fn with_system(mut self, instructions: impl Into<String>) -> Self {
         self.system = Some(instructions.into());
         self
     }
 
-    /// Cap the number of turns kept verbatim.
+    /// 限制逐字保留的轮数。
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns.max(2);
         self
     }
 
-    /// Cap the estimated token size of the prompt.
+    /// 限制提示词的估算 token 大小。
     pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
         self.max_tokens = max_tokens.max(32);
         self
     }
 
-    /// Cap the length of a folded summary.
+    /// 限制折叠摘要的长度。
     pub fn with_summary_budget(mut self, max_chars: usize) -> Self {
         self.summary_max_chars = max_chars.max(32);
         self
     }
 
-    /// Append a turn, returning what happened to the older ones.
+    /// 追加一轮，返回较旧的轮发生了什么。
     pub fn push(&mut self, turn: Turn) -> TrimReason {
         self.turns.push(turn);
         self.enforce_budget()
     }
 
-    /// Append a user turn.
+    /// 追加一个用户轮。
     pub fn push_user(&mut self, content: impl Into<String>) -> TrimReason {
         self.push(Turn::user(content))
     }
 
-    /// Append an assistant turn.
+    /// 追加一个助手轮。
     pub fn push_assistant(&mut self, content: impl Into<String>) -> TrimReason {
         self.push(Turn::assistant(content))
     }
 
-    /// The standing system instruction, if set.
+    /// 常驻系统指令（若已设置）。
     pub fn system(&self) -> Option<&str> {
         self.system.as_deref()
     }
 
-    /// Turns kept verbatim, oldest first.
+    /// 逐字保留的轮，最旧的在前。
     pub fn turns(&self) -> &[Turn] {
         &self.turns
     }
 
-    /// How many turns have been folded into the summary so far.
+    /// 迄今有多少轮被折叠进摘要。
     pub fn fold_count(&self) -> usize {
         self.fold_count
     }
 
-    /// The summary of everything folded away.
+    /// 所有被折叠掉内容的摘要。
     pub fn summary(&self) -> Option<&str> {
         self.folded_summary.as_deref()
     }
 
-    /// Estimated tokens of the prompt this window would render.
+    /// 此窗口将渲染的提示词的估算 token。
     pub fn tokens(&self) -> usize {
         let system = self.system.as_ref().map_or(0, |text| message_size(text, None));
         let summary = self
@@ -267,7 +267,7 @@ impl ConversationWindow {
         system + summary + self.turns.iter().map(Turn::tokens).sum::<usize>()
     }
 
-    /// Trim to the turn budget, keeping the newest turns.
+    /// 裁剪到轮预算，保留最新的轮。
     pub fn trim_to_turns(&mut self) -> Vec<Turn> {
         let mut dropped = Vec::new();
         while self.turns.len() > self.max_turns {
@@ -277,7 +277,7 @@ impl ConversationWindow {
         dropped
     }
 
-    /// Trim to the token budget, keeping the newest turns.
+    /// 裁剪到 token 预算，保留最新的轮。
     pub fn trim_to_tokens(&mut self) -> Vec<Turn> {
         let mut dropped = Vec::new();
         while self.tokens() > self.max_tokens && self.turns.len() > 2 {
@@ -287,8 +287,8 @@ impl ConversationWindow {
         dropped
     }
 
-    /// A tool result whose assistant call was trimmed away cannot be replayed
-    /// on its own, so drop it too rather than emit a malformed prompt.
+    /// 助手调用已被裁掉的工具结果无法单独回放，
+    /// 因此也丢弃它，而非发出格式错误的提示词。
     fn drop_orphaned_leading_tools(&mut self, dropped: &mut Vec<Turn>) {
         while self
             .turns
@@ -299,9 +299,9 @@ impl ConversationWindow {
         }
     }
 
-    /// Apply both budgets, keeping the newest turns. The turn ceiling is
-    /// enforced first, then the token ceiling, so a push that breaches both
-    /// cannot leave the prompt over its token budget.
+    /// 同时应用两个预算，保留最新的轮。先强制轮上限，
+    /// 再强制 token 上限，因此同时突破两者的 push
+    /// 不会让提示词超出其 token 预算。
     pub fn enforce_budget(&mut self) -> TrimReason {
         let mut reason = TrimReason::None;
         if self.turns.len() > self.max_turns {
@@ -315,16 +315,16 @@ impl ConversationWindow {
         reason
     }
 
-    /// Fold the oldest turns into the summary so far, keeping at least
-    /// `keep_last` recent ones.
+    /// 把最旧的轮折叠进迄今的摘要，至少保留
+    /// `keep_last` 个最近的轮。
     pub async fn fold<S: Summariser + ?Sized>(&mut self, summariser: &S, keep_last: usize) -> MemoryResult<Option<String>> {
         let keep_last = keep_last.max(1);
         if self.turns.len() <= keep_last {
             return Ok(self.folded_summary.clone());
         }
         let mut stale_count = self.turns.len() - keep_last;
-        // Never start the kept region on a tool result: back up to the call that
-        // requested it, so a fold boundary cannot orphan a tool turn.
+        // 绝不让保留区从工具结果开始：回退到请求它的调用，
+        // 使折叠边界不会孤立一个工具轮。
         while stale_count > 0 && self.turns[stale_count].speaker == Speaker::Tool {
             stale_count -= 1;
         }
@@ -350,7 +350,7 @@ impl ConversationWindow {
         Ok(Some(summary))
     }
 
-    /// The conversation as provider messages: system, summary, turns.
+    /// 作为提供方消息的对话：系统、摘要、轮。
     pub fn as_messages(&self) -> Vec<ChatMessage> {
         let mut out = Vec::with_capacity(self.turns.len() + 2);
         if let Some(system) = &self.system {
@@ -365,14 +365,14 @@ impl ConversationWindow {
         out
     }
 
-    /// The conversation plus a fresh user message.
+    /// 对话加上一条新的用户消息。
     pub fn as_prompt(&self, user_text: &str) -> Vec<ChatMessage> {
         let mut messages = self.as_messages();
         messages.push(ChatMessage::user(user_text));
         messages
     }
 
-    /// A plain transcript, useful for logs and prompts that are not structured.
+    /// 纯文本转录，适用于日志与非结构化提示词。
     pub fn render(&self) -> String {
         let mut out = String::new();
         if let Some(summary) = &self.folded_summary {
@@ -391,14 +391,14 @@ impl ConversationWindow {
         out
     }
 
-    /// Forget everything except the system prompt.
+    /// 忘记除系统提示词外的一切。
     pub fn clear(&mut self) {
         self.turns.clear();
         self.folded_summary = None;
         self.fold_count = 0;
     }
 
-    /// True when nothing has been recorded yet.
+    /// 当尚未记录任何内容时为真。
     pub fn is_empty(&self) -> bool {
         self.turns.is_empty() && self.folded_summary.is_none()
     }
@@ -413,21 +413,21 @@ fn clamp_chars(text: &str, max_chars: usize) -> String {
     out
 }
 
-/// A per-entity conversation record, kept as a component.
+/// 每实体一份的对话记录，作为组件保存。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionMemory {
-    /// Conversation identifier.
+    /// 对话标识符。
     pub session: String,
-    /// The bounded window itself.
+    /// 有界窗口本身。
     pub window: ConversationWindow,
-    /// Total user turns seen, including dropped ones.
+    /// 见过的用户轮总数，含被丢弃的。
     pub user_turns: usize,
-    /// Total assistant turns seen, including dropped ones.
+    /// 见过的助手轮总数，含被丢弃的。
     pub assistant_turns: usize,
 }
 
 impl SessionMemory {
-    /// Start a session with a persona instruction.
+    /// 以人设指令开始一个会话。
     pub fn new(session: impl Into<String>, system: impl Into<String>) -> Self {
         Self {
             session: session.into(),
@@ -437,24 +437,24 @@ impl SessionMemory {
         }
     }
 
-    /// Record a user turn.
+    /// 记录一个用户轮。
     pub fn record_user(&mut self, content: impl Into<String>) -> TrimReason {
         self.user_turns += 1;
         self.window.push_user(content)
     }
 
-    /// Record an assistant turn.
+    /// 记录一个助手轮。
     pub fn record_assistant(&mut self, content: impl Into<String>) -> TrimReason {
         self.assistant_turns += 1;
         self.window.push_assistant(content)
     }
 
-    /// Record a tool turn.
+    /// 记录一个工具轮。
     pub fn record_tool(&mut self, call_id: impl Into<String>, content: impl Into<String>) {
         self.window.push(Turn::tool(call_id, content));
     }
 
-    /// Total turns seen, whether kept or dropped.
+    /// 见过的轮总数，无论保留还是丢弃。
     pub fn turns_seen(&self) -> usize {
         self.user_turns + self.assistant_turns
     }
@@ -540,8 +540,8 @@ mod tests {
         for index in 0..6 {
             window.push_user(format!("question {index} {}", "pad".repeat(10)));
         }
-        // Tighten both ceilings below the current state, then push once more so
-        // the real push path runs enforce_budget.
+        // 把两个上限都收紧到当前状态之下，再 push 一次，
+        // 使真实的 push 路径运行 enforce_budget。
         window = window.with_max_turns(4).with_max_tokens(40);
         window.push_user("one more");
         assert!(window.turns().len() <= 4, "the turn ceiling holds");
@@ -652,8 +652,8 @@ mod tests {
             window.push_assistant(format!("calling tool {index}"));
             window.push(Turn::tool(format!("c{index}"), format!("result {index}")));
         }
-        // Eight turns; keep_last=5 naively starts the kept region on tool `c1`,
-        // orphaning it from the assistant call that asked for it.
+        // 八个轮；keep_last=5 朴素地让保留区从工具 `c1` 开始，
+        // 把它与请求它的助手调用孤立开来。
         let summary = window
             .fold(&HeuristicSummariser::new(2, 200), 5)
             .await

@@ -1,4 +1,4 @@
-//! The provider boundary: one async trait, object-safe behind an `Arc`.
+//! 提供方边界：一个异步 trait，置于 `Arc` 之后即对象安全。
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,56 +11,55 @@ use crate::message::{FinishReason, StreamChunk};
 use crate::request::GenerationRequest;
 use crate::GenerationResponse;
 
-/// A boxed, `Send` stream of incremental generation events.
+/// 增量生成事件的装箱 `Send` 流。
 pub type StreamBox = Pin<Box<dyn Stream<Item = Result<StreamChunk, LlmError>> + Send + 'static>>;
 
-/// Any provider shareable across systems and tokio tasks.
+/// 可在系统与 tokio 任务之间共享的任意提供方。
 pub type DynProvider = Arc<dyn Provider>;
 
-/// A model backend: chat completion plus, optionally, streaming.
+/// 一个模型后端：聊天补全，外加可选的流式。
 ///
-/// Implementations must be cheap to clone-by-`Arc` and safe to call
-/// concurrently from several agent entities at once.
+/// 实现必须能廉价地按 `Arc` 克隆，并可安全地被多个智能体实体同时并发调用。
 #[async_trait]
 pub trait Provider: Send + Sync + 'static {
-    /// Stable identifier used in logs and metrics (`mock`, `openai`, …).
+    /// 用于日志与指标的稳定标识符（`mock`、`openai`……）。
     fn id(&self) -> &str;
 
-    /// Model used when a request leaves `model` empty.
+    /// 当请求的 `model` 为空时使用的模型。
     fn default_model(&self) -> &str;
 
-    /// Ask for the next assistant turn.
+    /// 请求下一个助手轮。
     async fn generate(&self, request: &GenerationRequest) -> Result<GenerationResponse, LlmError>;
 
-    /// Ask for the next turn as a stream of chunks.
+    /// 以块流的形式请求下一轮。
     ///
-    /// The default delegates to [`Provider::generate`] and emits one chunk, so a
-    /// caller can stream any provider that only answers in one shot.
+    /// 默认实现委托给 [`Provider::generate`] 并发出一个块，
+    /// 因此调用者可以流式读取任何只一次性作答的提供方。
     async fn stream(&self, request: &GenerationRequest) -> Result<StreamBox, LlmError> {
         let response = self.generate(request).await?;
         Ok(one_shot(response))
     }
 
-    /// Capabilities a runtime can branch on without probing the provider.
+    /// 运行时可据此分支、无需探测提供方的能力。
     fn capabilities(&self) -> Capabilities {
         Capabilities::default()
     }
 }
 
-/// What a provider claims to support.
+/// 提供方声称支持的内容。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
-    /// Chat completions accept tool definitions.
+    /// 聊天补全接受工具定义。
     pub tools: bool,
-    /// The provider emits incremental chunks.
+    /// 提供方发出增量块。
     pub streaming: bool,
-    /// Image inputs are accepted.
+    /// 接受图像输入。
     pub vision: bool,
-    /// Structured output can be requested.
+    /// 可请求结构化输出。
     pub json_mode: bool,
 }
 
-/// Wrap a finished response as a single-chunk stream.
+/// 将已完成的响应包装为单块流。
 pub fn one_shot(response: GenerationResponse) -> StreamBox {
     let usage = response.usage;
     let chunks = vec![
@@ -74,7 +73,7 @@ pub fn one_shot(response: GenerationResponse) -> StreamBox {
     Box::pin(stream::iter(chunks.into_iter().map(Ok)))
 }
 
-/// Collect a stream into a single response, stopping at the first error.
+/// 将流收集为单个响应，遇到第一个错误即停止。
 pub async fn collect_stream<S>(mut stream: S) -> Result<GenerationResponse, LlmError>
 where
     S: Stream<Item = Result<StreamChunk, LlmError>> + Send + Unpin + 'static,
@@ -93,7 +92,7 @@ mod tests {
     use crate::mock::MockProvider;
     use futures::StreamExt;
 
-    /// A provider that implements only `generate`, to test the default `stream`.
+    /// 只实现 `generate` 的提供方，用于测试默认的 `stream`。
     struct TextOnly;
 
     #[async_trait::async_trait]

@@ -1,4 +1,4 @@
-//! Global singleton state attached to the world rather than to an entity.
+//! 附着在世界而非实体上的全局单例状态。
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -6,7 +6,7 @@ use std::fmt;
 
 use crate::component::Resource;
 
-/// Type-map of [`Resource`]s, plus the concrete type names needed for reporting.
+/// [`Resource`] 的类型映射，外加报告所需的具体类型名。
 #[derive(Default)]
 pub struct Resources {
     map: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
@@ -14,30 +14,30 @@ pub struct Resources {
 }
 
 impl Resources {
-    /// Creates an empty resource set.
+    /// 创建一个空资源集。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Number of inserted resources.
+    /// 已插入资源的数量。
     #[inline]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
-    /// `true` when no resource is inserted.
+    /// 没有插入资源时为 `true`。
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
-    /// `true` when `R` is present.
+    /// 存在 `R` 时为 `true`。
     #[inline]
     pub fn contains<R: Resource>(&self) -> bool {
         self.map.contains_key(&TypeId::of::<R>())
     }
 
-    /// Shared reference to `R`.
+    /// 对 `R` 的共享引用。
     #[inline]
     pub fn get<R: Resource>(&self) -> Option<&R> {
         self.map
@@ -45,7 +45,7 @@ impl Resources {
             .and_then(|value| value.downcast_ref::<R>())
     }
 
-    /// Exclusive reference to `R`.
+    /// 对 `R` 的独占引用。
     #[inline]
     pub fn get_mut<R: Resource>(&mut self) -> Option<&mut R> {
         self.map
@@ -53,7 +53,7 @@ impl Resources {
             .and_then(|value| value.downcast_mut::<R>())
     }
 
-    /// Inserts `value`, returning the previous one.
+    /// 插入 `value`，返回先前的值。
     #[inline]
     pub fn insert<R: Resource>(&mut self, value: R) -> Option<R> {
         let type_id = TypeId::of::<R>();
@@ -64,7 +64,7 @@ impl Resources {
             .map(|boxed| *boxed)
     }
 
-    /// Removes `R`.
+    /// 移除 `R`。
     #[inline]
     pub fn remove<R: Resource>(&mut self) -> Option<R> {
         let type_id = TypeId::of::<R>();
@@ -75,7 +75,7 @@ impl Resources {
             .map(|boxed| *boxed)
     }
 
-    /// Inserts `R::default()` unless it already exists and returns it mutably.
+    /// 若 `R::default()` 尚不存在则插入，并返回其可变引用。
     pub fn init<R: Resource + Default>(&mut self) -> &mut R {
         let type_id = TypeId::of::<R>();
         self.names.insert(type_id, std::any::type_name::<R>());
@@ -85,19 +85,19 @@ impl Resources {
         self.get_mut::<R>().expect("entry was just ensured")
     }
 
-    /// Shared reference to `R`, inserting `R::default()` when missing.
+    /// 对 `R` 的共享引用，缺失时插入 `R::default()`。
     pub fn get_or_init<R: Resource + Default>(&mut self) -> &mut R {
         self.init::<R>()
     }
 
-    /// Type names of the inserted resources, sorted for deterministic reports.
+    /// 已插入资源的类型名，排序以得到确定性报告。
     pub fn names(&self) -> Vec<&'static str> {
         let mut names: Vec<&'static str> = self.names.values().copied().collect();
         names.sort_unstable();
         names
     }
 
-    /// Drops every resource.
+    /// 丢弃所有资源。
     pub fn clear(&mut self) {
         self.map.clear();
         self.names.clear();
