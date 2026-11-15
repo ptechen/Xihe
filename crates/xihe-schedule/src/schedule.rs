@@ -8,6 +8,7 @@ use crate::access::Access;
 use crate::context::SystemContext;
 use crate::error::{ScheduleError, SystemError};
 use crate::system::{Period, System, SystemFuture, run_guarded};
+use crate::work::Work;
 
 /// A system plus the metadata the scheduler needs.
 pub struct SystemSpec {
@@ -396,6 +397,7 @@ impl Schedule {
                             if self.isolate {
                                 tracing::warn!(system = %spec.label, %error, "system failed; isolated");
                                 newly_failed.push(spec.label.to_string());
+                                release_work(ctx, spec.system.name()).await;
                             } else {
                                 return Err(error);
                             }
@@ -413,23 +415,27 @@ impl Schedule {
                     let flags = cadence(&mut self.last_run, systems, frame);
                     let mut pending: Vec<SystemFuture<'_>> = Vec::new();
                     let mut labels: Vec<Cow<'static, str>> = Vec::new();
+                    let mut owners: Vec<String> = Vec::new();
                     for (spec, is_due) in systems.iter_mut().zip(flags) {
                         if is_due && !self.failed.contains(spec.label.as_ref()) {
                             labels.push(spec.label.clone());
+                            owners.push(spec.system.name().to_string());
                             pending.push(Box::pin(run_guarded(
                                 &spec.label,
                                 spec.system.run(ctx.clone()),
                             )));
                         }
                     }
-                    for (label, result) in labels
+                    for ((label, owner), result) in labels
                         .into_iter()
+                        .zip(owners)
                         .zip(futures::future::join_all(pending).await)
                     {
                         if let Err(error) = result {
                             if self.isolate {
                                 tracing::warn!(system = %label, %error, "system failed; isolated");
                                 newly_failed.push(label.to_string());
+                                release_work(ctx, &owner).await;
                             } else {
                                 return Err(error);
                             }
@@ -448,6 +454,16 @@ impl Schedule {
         self.failed.extend(newly_failed);
         Ok(())
     }
+}
+
+/// Release the work a just-isolated system claimed. An isolated system is
+/// skipped for the rest of the run, so it can never settle its own labels; left
+/// claimed they would keep the driver awake until the frame budget. The owner is
+/// the system's `name()`, which is what producers declare and which may differ
+/// from the registration label.
+async fn release_work(ctx: &SystemContext, owner: &str) {
+    ctx.with_world_mut(|world| Work::ensure(world).release_owner(owner))
+        .await;
 }
 
 /// Flags every member of a stage that is due on this frame, stamping the ones
@@ -714,6 +730,58 @@ mod tests {
         let ctx = SystemContext::new(WorldHandle::empty());
         assert!(schedule.execute(&ctx).await.is_err(), "fail-fast remains the default");
         assert!(schedule.failed_labels().is_empty());
+    }
+
+    #[tokio::test]
+    async fn isolation_releases_work_under_the_system_name_not_the_label() {
+        let mut schedule = Schedule::new();
+        schedule.add(SystemSpec::new(
+            "route",
+            system("route-task", |ctx: SystemContext| async move {
+                ctx.with_world_mut(|world| Work::ensure(world).set_owned("agents", true, "route-task"))
+                    .await;
+                Err(SystemError::new("route-task", "no api key"))
+            }),
+        ));
+        schedule.isolate_system_errors();
+        let ctx = SystemContext::new(WorldHandle::empty());
+        schedule.execute(&ctx).await.unwrap();
+        assert_eq!(schedule.failed_labels(), vec!["route".to_string()]);
+        let busy = ctx
+            .with_world(|world| world.resource::<Work>().map(|work| work.is_busy()).unwrap_or(false))
+            .await;
+        assert!(!busy, "work is released under the system name, not the registration label");
+    }
+
+    #[tokio::test]
+    async fn isolation_releases_a_parallel_members_work_under_its_name() {
+        let mut schedule = Schedule::new();
+        schedule
+            .parallel(
+                "workers",
+                [
+                    SystemSpec::new(
+                        "route",
+                        system("route-task", |ctx: SystemContext| async move {
+                            ctx.with_world_mut(|world| {
+                                Work::ensure(world).set_owned("agents", true, "route-task")
+                            })
+                            .await;
+                            Err(SystemError::new("route-task", "boom"))
+                        }),
+                    )
+                    .with_access(Access::read::<A>()),
+                    counting("healthy", Arc::new(AtomicU64::new(0)), Access::read::<A>()),
+                ],
+            )
+            .unwrap();
+        schedule.isolate_system_errors();
+        let ctx = SystemContext::new(WorldHandle::empty());
+        schedule.execute(&ctx).await.unwrap();
+        let busy = ctx
+            .with_world(|world| world.resource::<Work>().map(|work| work.is_busy()).unwrap_or(false))
+            .await;
+        assert!(!busy, "the failing parallel member's work is released");
     }
 
     #[tokio::test]

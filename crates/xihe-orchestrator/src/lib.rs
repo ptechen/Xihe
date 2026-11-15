@@ -47,6 +47,13 @@ pub enum OrchestratorError {
         /// What the agent reported.
         error: String,
     },
+    /// A hand-off was applied before its source agent finished.
+    SourceNotFinished {
+        /// The source agent that has no answer yet.
+        name: String,
+        /// Its current status.
+        status: AgentStatus,
+    },
 }
 
 impl Display for OrchestratorError {
@@ -60,6 +67,9 @@ impl Display for OrchestratorError {
             }
             Self::BranchFailed { name, error } => {
                 write!(f, "branch `{name}` failed: {error}")
+            }
+            Self::SourceNotFinished { name, status } => {
+                write!(f, "handoff source `{name}` is {}, not finished", status.as_str())
             }
         }
     }
@@ -174,7 +184,9 @@ impl Handoff {
     /// Write the hand-off into the world.
     ///
     /// Returns the question that was queued, so a caller can log it. The source
-    /// agent must already be [`AgentStatus::Finished`].
+    /// agent must already be [`AgentStatus::Finished`]; otherwise this returns
+    /// [`OrchestratorError::SourceNotFinished`] rather than handing off an empty
+    /// answer.
     pub fn apply(&self, world: &mut World, roster: &Roster) -> Result<String, OrchestratorError> {
         let from = roster
             .get(&self.from)
@@ -186,14 +198,18 @@ impl Handoff {
             .ok_or_else(|| OrchestratorError::UnknownAgent {
                 name: self.to.clone(),
             })?;
-        let answer = world
+        let source = world
             .get::<ReactAgent>(from.entity)
             .ok_or(OrchestratorError::MissingEntity {
                 entity: from.entity,
-            })?
-            .answer()
-            .unwrap_or("")
-            .to_string();
+            })?;
+        if source.status() != AgentStatus::Finished {
+            return Err(OrchestratorError::SourceNotFinished {
+                name: self.from.clone(),
+                status: source.status(),
+            });
+        }
+        let answer = source.answer().unwrap_or("").to_string();
         let question = if self.preface.is_empty() {
             answer
         } else {
@@ -424,13 +440,24 @@ pub struct FanOut {
 /// How fan-out answers become one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Reduce {
-    /// Join every answer, labelled by agent.
+    /// Join every answer, labelled by agent. Needs every branch to finish; a
+    /// failed branch aborts the reduction.
     #[default]
     Concat,
-    /// Keep the longest answer.
+    /// Keep the longest finished answer. Waits for every branch to settle, but
+    /// drops failed branches instead of waiting on or aborting over them.
     Longest,
-    /// Keep the first answer in roster order.
+    /// Keep the first roster branch's answer. Needs only that branch; slow or
+    /// failed siblings are irrelevant.
     First,
+}
+
+/// One branch's state, snapshotted for a reduction.
+struct Branch {
+    name: String,
+    status: AgentStatus,
+    answer: String,
+    error: String,
 }
 
 impl FanOut {
@@ -471,14 +498,17 @@ impl FanOut {
         Ok(queued)
     }
 
-    /// Combine finished answers.
+    /// Combine finished answers according to [`Reduce`].
     ///
-    /// Returns [`OrchestratorError::Incomplete`] while any branch is still open,
-    /// so a caller cannot reduce a partial team by accident. A branch that
-    /// failed is terminal and will never finish, so it is reported as
+    /// Each mode waits for only what it needs: [`Reduce::Concat`] needs every
+    /// branch finished, [`Reduce::Longest`] needs every branch settled (failed
+    /// branches are dropped), and [`Reduce::First`] needs only the first roster
+    /// branch. While a mode's requirement is unmet it returns
+    /// [`OrchestratorError::Incomplete`], counting every finished branch. A
+    /// failure that a mode cannot ignore is reported as
     /// [`OrchestratorError::BranchFailed`] rather than waited on forever.
     pub fn reduce(&self, world: &World, roster: &Roster) -> Result<String, OrchestratorError> {
-        let mut answers = Vec::with_capacity(self.agents.len());
+        let mut branches = Vec::with_capacity(self.agents.len());
         for name in &self.agents {
             let entry = roster
                 .get(name)
@@ -488,38 +518,67 @@ impl FanOut {
                 .ok_or(OrchestratorError::MissingEntity {
                     entity: entry.entity,
                 })?;
-            let status = agent.status();
-            if status == AgentStatus::Failed {
-                return Err(OrchestratorError::BranchFailed {
-                    name: name.clone(),
-                    error: agent.error().unwrap_or("").to_string(),
-                });
-            }
-            if status != AgentStatus::Finished {
-                return Err(OrchestratorError::Incomplete {
-                    finished: answers.len(),
-                    expected: self.agents.len(),
-                });
-            }
-            answers.push((name.clone(), agent.answer().unwrap_or("").to_string()));
+            branches.push(Branch {
+                name: name.clone(),
+                status: agent.status(),
+                answer: agent.answer().unwrap_or("").to_string(),
+                error: agent.error().unwrap_or("").to_string(),
+            });
         }
-        Ok(match self.reduce {
-            Reduce::Concat => answers
-                .iter()
-                .map(|(name, answer)| format!("{name}: {answer}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Reduce::Longest => answers
-                .into_iter()
-                .max_by_key(|(_, answer)| answer.chars().count())
-                .map(|(_, answer)| answer)
-                .unwrap_or_default(),
-            Reduce::First => answers
-                .into_iter()
-                .next()
-                .map(|(_, answer)| answer)
-                .unwrap_or_default(),
-        })
+
+        let expected = branches.len();
+        if expected == 0 {
+            return Ok(String::new());
+        }
+        let finished = branches
+            .iter()
+            .filter(|branch| branch.status == AgentStatus::Finished)
+            .count();
+        let settled = branches
+            .iter()
+            .filter(|branch| branch.status.is_terminal())
+            .count();
+        let incomplete = || OrchestratorError::Incomplete { finished, expected };
+        let branch_failed = |branch: &Branch| OrchestratorError::BranchFailed {
+            name: branch.name.clone(),
+            error: branch.error.clone(),
+        };
+
+        match self.reduce {
+            Reduce::First => match branches.first() {
+                Some(branch) if branch.status == AgentStatus::Finished => Ok(branch.answer.clone()),
+                Some(branch) if branch.status == AgentStatus::Failed => Err(branch_failed(branch)),
+                Some(_) => Err(incomplete()),
+                None => Ok(String::new()),
+            },
+            Reduce::Longest => {
+                if settled < expected {
+                    return Err(incomplete());
+                }
+                branches
+                    .iter()
+                    .filter(|branch| branch.status == AgentStatus::Finished)
+                    .max_by_key(|branch| branch.answer.chars().count())
+                    .map(|branch| branch.answer.clone())
+                    .ok_or_else(|| branch_failed(&branches[0]))
+            }
+            Reduce::Concat => {
+                if let Some(branch) = branches
+                    .iter()
+                    .find(|branch| branch.status == AgentStatus::Failed)
+                {
+                    return Err(branch_failed(branch));
+                }
+                if finished < expected {
+                    return Err(incomplete());
+                }
+                Ok(branches
+                    .iter()
+                    .map(|branch| format!("{}: {}", branch.name, branch.answer))
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+        }
     }
 }
 
@@ -531,9 +590,11 @@ fn overlap(task: &str, description: &str) -> usize {
 }
 
 /// Tell the driver that agent work was just queued, even if React already
-/// reported itself settled earlier in the same frame.
+/// reported itself settled earlier in the same frame. The claim belongs to the
+/// React system: it drains agent work and clears the claim when agents settle,
+/// and if React is isolated the schedule releases the claim on its behalf.
 async fn mark_agents_busy(ctx: &SystemContext) {
-    ctx.with_world_mut(|world| Work::ensure(world).set("agents", true))
+    ctx.with_world_mut(|world| Work::ensure(world).set_owned("agents", true, "react"))
         .await;
 }
 
@@ -666,8 +727,10 @@ pub struct FanOutResult(pub String);
 
 /// A system that sends the same task to several agents and reduces their answers.
 ///
-/// Dispatches on the first frame, then waits for every branch to finish before
-/// writing a [`FanOutResult`] resource.
+/// Dispatches on the first frame, then writes a [`FanOutResult`] resource as soon
+/// as the configured [`Reduce`] is satisfied: every branch finished for
+/// [`Reduce::Concat`], every branch settled (failed ones dropped) for
+/// [`Reduce::Longest`], or just the first roster branch for [`Reduce::First`].
 ///
 /// Add it after [`xihe_agent::React`]: it reduces once the branches finish, so
 /// running it before React lets the driver settle in the dispatch frame, before
@@ -715,17 +778,17 @@ impl System for FanOutTask {
             .with_world_mut(move |world| {
                 if !dispatched {
                     fan.dispatch(world, &roster, &task)?;
-                    return Ok((true, None));
+                    return Ok(None);
                 }
                 match fan.reduce(world, &roster) {
-                    Ok(answer) => Ok((true, Some(answer))),
-                    Err(OrchestratorError::Incomplete { .. }) => Ok((true, None)),
+                    Ok(answer) => Ok(Some(answer)),
+                    Err(OrchestratorError::Incomplete { .. }) => Ok(None),
                     Err(error) => Err(error),
                 }
             })
             .await;
         match result {
-            Ok((true, Some(answer))) => {
+            Ok(Some(answer)) => {
                 ctx.with_world_mut(|world| {
                     world.insert_resource(FanOutResult(answer));
                 })
@@ -733,14 +796,13 @@ impl System for FanOutTask {
                 self.done = true;
                 Ok(())
             }
-            Ok((true, None)) => {
+            Ok(None) => {
                 if !self.dispatched {
                     mark_agents_busy(&ctx).await;
                 }
                 self.dispatched = true;
                 Ok(())
             }
-            Ok((false, _)) => Ok(()),
             Err(error) => Err(SystemError::new("fan-out", error.to_string())),
         }
     }
@@ -826,6 +888,14 @@ mod tests {
             .finish(answer.to_string());
     }
 
+    fn fail(world: &mut World, name: &str, roster: &Roster) {
+        let entity = roster.get(name).expect(name).entity;
+        world
+            .get_mut::<ReactAgent>(entity)
+            .expect("agent")
+            .fail(&xihe_agent::AgentError::Stopped);
+    }
+
     #[test]
     fn a_handoff_queues_the_answer_as_the_next_question() {
         let mut world = World::new();
@@ -840,6 +910,25 @@ mod tests {
             .unwrap();
         assert_eq!(ops.status(), AgentStatus::Working);
         assert!(ops.awaits_model());
+    }
+
+    #[test]
+    fn a_handoff_refuses_an_unfinished_source() {
+        let mut world = World::new();
+        let roster = team(&mut world);
+        // scribe is asked but has not finished: there is no answer to hand off.
+        let scribe = roster.get("scribe").unwrap().entity;
+        world
+            .get_mut::<ReactAgent>(scribe)
+            .unwrap()
+            .push_question("review");
+        let error = Handoff::new("scribe", "ops", "act on this")
+            .apply(&mut world, &roster)
+            .expect_err("an unfinished source has no answer to hand off");
+        assert!(
+            matches!(&error, OrchestratorError::SourceNotFinished { name, .. } if name == "scribe"),
+            "the unfinished source is named: {error:?}"
+        );
     }
 
     #[test]
@@ -941,6 +1030,100 @@ mod tests {
         finish(&mut world, "scribe", &roster, "a");
         finish(&mut world, "ops", &roster, "b");
         assert_eq!(fan.reduce(&world, &roster).expect("joined"), "scribe: a\nops: b");
+    }
+
+    #[test]
+    fn incomplete_counts_every_finished_branch_not_just_the_prefix() {
+        let mut world = World::new();
+        let roster = team(&mut world);
+        let fan = FanOut::new(["scribe", "ops"]);
+        fan.dispatch(&mut world, &roster, "review").expect("queued");
+        // ops finishes while scribe is still open: the count must include ops,
+        // not stop at the first open branch in roster order.
+        finish(&mut world, "ops", &roster, "done");
+        assert!(matches!(
+            fan.reduce(&world, &roster),
+            Err(OrchestratorError::Incomplete { finished: 1, expected: 2 })
+        ));
+    }
+
+    #[test]
+    fn a_failed_branch_is_terminal_even_behind_an_open_one() {
+        let mut world = World::new();
+        let roster = team(&mut world);
+        let fan = FanOut::new(["scribe", "ops"]);
+        fan.dispatch(&mut world, &roster, "review").expect("queued");
+        // scribe is still open, ops has failed permanently. The team can never
+        // complete, so this must surface as BranchFailed, not a wait signal.
+        let ops = roster.get("ops").unwrap().entity;
+        world
+            .get_mut::<ReactAgent>(ops)
+            .unwrap()
+            .fail(&xihe_agent::AgentError::Stopped);
+        let error = fan.reduce(&world, &roster).unwrap_err();
+        assert!(
+            matches!(&error, OrchestratorError::BranchFailed { name, .. } if name == "ops"),
+            "a terminal failure wins over an open branch: {error:?}"
+        );
+    }
+
+    #[test]
+    fn first_reduces_as_soon_as_the_first_branch_finishes() {
+        let mut world = World::new();
+        let roster = team(&mut world);
+        let fan = FanOut::new(["scribe", "ops"]).with_reduce(Reduce::First);
+        fan.dispatch(&mut world, &roster, "review").expect("queued");
+        finish(&mut world, "scribe", &roster, "the first answer");
+        // ops is still open, but First only needs the first roster branch.
+        assert_eq!(
+            fan.reduce(&world, &roster).expect("reduced"),
+            "the first answer"
+        );
+    }
+
+    #[test]
+    fn first_still_waits_for_the_first_branch() {
+        let mut world = World::new();
+        let roster = team(&mut world);
+        let fan = FanOut::new(["scribe", "ops"]).with_reduce(Reduce::First);
+        fan.dispatch(&mut world, &roster, "review").expect("queued");
+        // ops finished but scribe (the first branch) is still open: First must
+        // wait for scribe, not hand back ops's answer.
+        finish(&mut world, "ops", &roster, "a later answer");
+        assert!(matches!(
+            fan.reduce(&world, &roster),
+            Err(OrchestratorError::Incomplete { .. })
+        ));
+    }
+
+    #[test]
+    fn longest_ignores_a_failed_sibling() {
+        let mut world = World::new();
+        let roster = team(&mut world);
+        let fan = FanOut::new(["scribe", "ops"]).with_reduce(Reduce::Longest);
+        fan.dispatch(&mut world, &roster, "review").expect("queued");
+        finish(&mut world, "scribe", &roster, "a usable answer");
+        fail(&mut world, "ops", &roster);
+        // A failed sibling is dropped, not waited on and not fatal: the longest
+        // finished answer still reduces.
+        assert_eq!(
+            fan.reduce(&world, &roster).expect("reduced"),
+            "a usable answer"
+        );
+    }
+
+    #[test]
+    fn longest_still_waits_for_an_open_sibling() {
+        let mut world = World::new();
+        let roster = team(&mut world);
+        let fan = FanOut::new(["scribe", "ops"]).with_reduce(Reduce::Longest);
+        fan.dispatch(&mut world, &roster, "review").expect("queued");
+        finish(&mut world, "scribe", &roster, "short");
+        // ops may still produce a longer answer, so Longest waits for it.
+        assert!(matches!(
+            fan.reduce(&world, &roster),
+            Err(OrchestratorError::Incomplete { .. })
+        ));
     }
 
     use xihe_schedule::{SystemContext, WorldHandle};

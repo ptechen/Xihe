@@ -5,6 +5,7 @@
 //! runs the schedule until every agent has settled, the frame budget runs out,
 //! or something asks the world to stop.
 
+use std::collections::HashSet;
 use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
@@ -185,6 +186,7 @@ impl Driver {
         let handle = WorldHandle::new(std::mem::replace(&mut app.world, World::new()));
         let ctx = SystemContext::new(handle.clone()).with_stop_token(app.stop.clone());
         let mut frames = 0u64;
+        let mut reported: HashSet<String> = HashSet::new();
         let reason = loop {
             if app.stop.is_stopped() {
                 let reason = app
@@ -217,8 +219,18 @@ impl Driver {
             }
             if self.observe {
                 let elapsed = started.elapsed();
+                // Isolation contains a failure inside `execute`, which then
+                // returns Ok; surface each newly-failed system here so a
+                // contained failure is still visible in the log, once each.
+                let failed = app.schedule.failed_labels();
                 ctx.with_world_mut(|world| {
-                    Observer::ensure(world).system("schedule", false, elapsed);
+                    let observer = Observer::ensure(world);
+                    observer.system("schedule", false, elapsed);
+                    for label in failed {
+                        if reported.insert(label.clone()) {
+                            observer.system(label, true, Duration::ZERO);
+                        }
+                    }
                 })
                 .await;
             }
@@ -371,7 +383,7 @@ mod tests {
     use serde_json::json;
     use xihe_agent::{AgentStatus, EchoTool, FnTool, ReactAgent, ToolOutcome, ToolRegistry};
     use xihe_llm::{MockProvider, Reply};
-    use xihe_schedule::{system, SystemSpec};
+    use xihe_schedule::{system, SystemSpec, Work};
 
     async fn echo_app() -> App {
         let mut app = App::new();
@@ -541,5 +553,71 @@ mod tests {
         let mut app = app_with_a_panicking_system().await;
         let result = app.run(4).await;
         assert!(result.is_err(), "fail-fast remains the default");
+    }
+
+    #[tokio::test]
+    async fn isolating_a_failing_system_releases_its_work_so_the_world_settles() {
+        let mut app = App::new();
+        app.add(LlmPlugin::new(LlmService::from_provider(MockProvider::with_script([
+            Reply::text("done"),
+        ]))))
+        .await
+        .expect("llm");
+        app.add(ToolsPlugin).await.expect("tools");
+        app.add(ReactPlugin::new(4)).await.expect("react");
+        // A peripheral system claims work, then dies. Isolation skips it forever
+        // after, so nobody else can clear its label: the driver must release it.
+        app.add_system(SystemSpec::new(
+            "ingest",
+            system("ingest", |ctx: SystemContext| async move {
+                ctx.with_world_mut(|world| Work::ensure(world).set_owned("ingest", true, "ingest"))
+                    .await;
+                panic!("ingest exploded after claiming work");
+            }),
+        ));
+        app.world_mut()
+            .spawn_with((ReactAgent::new("scribe", "be brief").ask("hi"),));
+        app.schedule_mut().isolate_system_errors();
+
+        let reason = app
+            .run(8)
+            .await
+            .expect("an isolated failure must not abort the app");
+        assert_eq!(
+            reason,
+            StopReason::Settled,
+            "a failed system's claimed work must be released, not orphaned"
+        );
+        assert!(!app.busy(), "no label keeps the driver awake");
+        let agent = app
+            .world()
+            .query::<&ReactAgent>()
+            .next()
+            .expect("an agent");
+        assert_eq!(agent.answer(), Some("done"), "the healthy agent still finished");
+    }
+
+    #[tokio::test]
+    async fn isolated_failures_are_visible_in_the_observer() {
+        let mut app = app_with_a_panicking_system().await;
+        app.schedule_mut().isolate_system_errors();
+
+        let reason = app.run(4).await.expect("isolated");
+        assert_eq!(reason, StopReason::Settled);
+
+        let observer = app.world().resource::<Observer>().expect("observer");
+        let snapshot = observer.snapshot();
+        assert!(
+            snapshot.system_failures >= 1,
+            "a contained failure must still be observable: {snapshot}"
+        );
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                xihe_observer::EventKind::System { name, failed: true, .. } if name == "boom"
+            )),
+            "the failing system is named in the log: {}",
+            observer.render()
+        );
     }
 }

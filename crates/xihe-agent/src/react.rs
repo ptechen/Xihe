@@ -1407,7 +1407,7 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
     .await;
 }
 
-async fn update_work(ctx: &SystemContext, _label: &str) {
+async fn update_work(ctx: &SystemContext, label: &str) {
     let busy = ctx
         .with_world(|world| {
             // A parked agent waits on a human, not on compute; only a park a
@@ -1417,7 +1417,7 @@ async fn update_work(ctx: &SystemContext, _label: &str) {
                 .any(|agent| agent.status == AgentStatus::Working || agent.has_decision())
         })
         .await;
-    ctx.with_world_mut(|world| Work::ensure(world).set("agents", busy))
+    ctx.with_world_mut(|world| Work::ensure(world).set_owned("agents", busy, label))
         .await;
 }
 
