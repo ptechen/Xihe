@@ -1,0 +1,22 @@
+[package]
+name = "xihe-schedule"
+description = "Async system trait, access analysis, schedule graph, per-system tracing spans, command queue and message bus."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+xihe-core.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

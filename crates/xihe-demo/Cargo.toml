@@ -1,0 +1,24 @@
+[package]
+name = "xihe-demo"
+description = "Runnable examples for the Xihe agent ECS framework."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# `openai` stays off by default so the workspace builds with no network; run
+# `cargo run -p xihe-demo --features live` to point the demo at a real endpoint.
+xihe = { workspace = true, features = ["hitl", "persist"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+
+[features]
+default = []
+# Adds the HTTP provider and the live-endpoint binary.
+live = ["xihe/openai"]
+
+[lints]
+workspace = true

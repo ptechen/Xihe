@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/xihe",
+    "crates/xihe-core",
+    "crates/xihe-schedule",
+    "crates/xihe-llm",
+    "crates/xihe-memory",
+    "crates/xihe-agent",
+    "crates/xihe-orchestrator",
+    "crates/xihe-observer",
+    "crates/xihe-runtime",
+    "crates/xihe-demo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/taochen/xihe"
+
+[workspace.dependencies]
+# --- in-crate ---
+xihe = { path = "crates/xihe", version = "0.1.0" }
+xihe-core = { path = "crates/xihe-core", version = "0.1.0" }
+xihe-schedule = { path = "crates/xihe-schedule", version = "0.1.0" }
+xihe-llm = { path = "crates/xihe-llm", version = "0.1.0" }
+xihe-memory = { path = "crates/xihe-memory", version = "0.1.0" }
+xihe-agent = { path = "crates/xihe-agent", version = "0.1.0" }
+xihe-orchestrator = { path = "crates/xihe-orchestrator", version = "0.1.0" }
+xihe-observer = { path = "crates/xihe-observer", version = "0.1.0" }
+xihe-runtime = { path = "crates/xihe-runtime", version = "0.1.0" }
+
+# --- external ---
+# Kept deliberately small: everything here is in the offline registry cache.
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tracing = "0.1"
+
+[profile.dev]
+opt-level = 0
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+keyword_idents_2024 = "deny"
+
+[workspace.lints.clippy]
+type_complexity = "allow"
+too_many_arguments = "allow"
+module_inception = "allow"
+new_without_default = "allow"
+result_large_err = "allow"
+large_enum_variant = "allow"

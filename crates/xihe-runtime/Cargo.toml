@@ -1,0 +1,33 @@
+[package]
+name = "xihe-runtime"
+description = "Application assembly: plugins, schedules, the tokio driver and graceful shutdown for Xihe worlds."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+xihe-core.workspace = true
+xihe-schedule.workspace = true
+xihe-llm.workspace = true
+xihe-memory.workspace = true
+xihe-agent.workspace = true
+xihe-observer.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = ["agent", "orchestrator", "observer"]
+agent = []
+orchestrator = []
+observer = []
+
+[lints]
+workspace = true

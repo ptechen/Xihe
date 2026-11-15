@@ -1,0 +1,38 @@
+[package]
+name = "xihe"
+description = "A tokio-based entity-component-system framework for building AI agents."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+xihe-core.workspace = true
+xihe-schedule.workspace = true
+xihe-llm.workspace = true
+xihe-memory.workspace = true
+xihe-agent.workspace = true
+xihe-orchestrator.workspace = true
+xihe-observer.workspace = true
+xihe-runtime.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+serde_json.workspace = true
+async-trait.workspace = true
+
+[features]
+default = ["std-driver"]
+# Re-export the batteries-included app/loop/plugins.
+std-driver = []
+# OpenAI-compatible HTTP provider.
+openai = ["xihe-llm/openai"]
+# Blocking human-in-the-loop approvals.
+hitl = ["xihe-agent/hitl"]
+# JSONL memory persistence.
+persist = ["xihe-memory/persist"]
+
+[lints]
+workspace = true
