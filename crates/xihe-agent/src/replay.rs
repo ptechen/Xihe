@@ -12,9 +12,10 @@
 //! (sorted by name), not the model name: the client fills the model in after the
 //! request is built, so keying on it would differ between recording and replay.
 //! A journal that already holds a request's tool results replays them; an empty
-//! one records them, so the same resource handles both directions. Rounds that
-//! park on a human approval still run live. To replay a run, install the
-//! populated [`Journal`] as a world resource and back the
+//! one records them, so the same resource handles both directions. A round that
+//! parks on a human approval journals its results once the human decides, so
+//! replay neither re-approves nor re-runs the approved tool. To replay a run,
+//! install the populated [`Journal`] as a world resource and back the
 //! [`LlmService`](crate::LlmService) with a [`ReplayProvider`] that shares it.
 
 use std::collections::{BTreeMap, HashMap};
@@ -34,12 +35,24 @@ use crate::tool::ToolOutcome;
 pub struct Journal {
     entries: Arc<Mutex<HashMap<String, GenerationResponse>>>,
     tools: Arc<Mutex<HashMap<String, ToolRecord>>>,
+    pending: Arc<Mutex<HashMap<String, PendingApproval>>>,
 }
 
 /// The tool results that followed one model response.
 #[derive(Clone, Serialize, Deserialize)]
 struct ToolRecord {
     results: Vec<(ToolCall, ToolOutcome)>,
+    refused: usize,
+}
+
+/// An approval that parked mid-run: the request that raised it plus the tool
+/// results already in hand, kept so the resume can journal the whole round.
+/// Deliberately not serialized: a journal saved while still parked is an
+/// incomplete recording, and replaying it parks again rather than guessing.
+#[derive(Clone)]
+struct PendingApproval {
+    request: GenerationRequest,
+    done: Vec<(ToolCall, ToolOutcome)>,
     refused: usize,
 }
 
@@ -140,6 +153,7 @@ impl Journal {
         Ok(Self {
             entries: Arc::new(Mutex::new(data.entries.into_iter().collect())),
             tools: Arc::new(Mutex::new(data.tools.into_iter().collect())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -160,6 +174,43 @@ impl Journal {
         Self::from_bytes(&bytes)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }
+
+    /// Remember a parked approval so its resume can journal the full round.
+    pub(crate) fn record_pending(
+        &self,
+        key: String,
+        request: GenerationRequest,
+        done: Vec<(ToolCall, ToolOutcome)>,
+        refused: usize,
+    ) {
+        self.pending.lock().expect("journal lock").insert(
+            key,
+            PendingApproval {
+                request,
+                done,
+                refused,
+            },
+        );
+    }
+
+    /// Take the parked approval for `key`, if this journal recorded one.
+    pub(crate) fn take_pending(
+        &self,
+        key: &str,
+    ) -> Option<(GenerationRequest, Vec<(ToolCall, ToolOutcome)>, usize)> {
+        self.pending
+            .lock()
+            .expect("journal lock")
+            .remove(key)
+            .map(|pending| (pending.request, pending.done, pending.refused))
+    }
+}
+
+/// A stable key for a parked approval: the agent, the generation turn that
+/// raised it, and the call id. The turn is the correlation's (the model call's),
+/// not the resume's turn count, so every approval in one round shares a turn.
+pub(crate) fn approval_key(agent: &str, turn: usize, call_id: &str) -> String {
+    format!("{agent}:{turn}:{call_id}")
 }
 
 /// A stable key for a request: its correlation (when present), its messages,

@@ -72,7 +72,7 @@ use crate::hitl::{ApprovalRequest, Approver, Decision};
 use crate::llm::LlmService;
 use crate::memory::MemoryService;
 use crate::output::ResponseFormat;
-use crate::replay::Journal;
+use crate::replay::{approval_key, Journal};
 use crate::tool::{ToolContext, ToolOutcome, ToolRegistry};
 
 /// Where the agent is in its task.
@@ -679,6 +679,7 @@ struct Resume {
     registry: ToolRegistry,
     tool_ctx: ToolContext,
     approver: Option<Arc<dyn Approver>>,
+    journal: Option<Journal>,
 }
 
 enum Step {
@@ -820,6 +821,7 @@ fn step_for(
                 registry: registry.clone(),
                 tool_ctx: tool_context(entity, agent, store),
                 approver: approver.clone(),
+                journal: journal.clone(),
             })));
         }
         return None;
@@ -935,6 +937,17 @@ impl Generation {
         {
             journal.record_tools(&self.request, results.clone(), refused);
         }
+        if let Some(parked) = &parked
+            && let Some(journal) = &self.journal
+            && let Some(correlation) = &self.request.correlation
+        {
+            journal.record_pending(
+                approval_key(&correlation.agent, correlation.turn, &parked.call.id),
+                self.request.clone(),
+                results.clone(),
+                refused,
+            );
+        }
         Outcome::Acted {
             entity: self.entity,
             turn: self.turn,
@@ -990,50 +1003,74 @@ impl Generation {
 
 impl Resume {
     /// Run (or refuse) the parked call, then carry on with whatever follows.
+    ///
+    /// When the recording journal parked this approval, the whole round — the
+    /// results already in hand plus what the decision produces — is journaled
+    /// under the original request, so a replay feeds it back without asking a
+    /// human again or re-running the approved tool.
     async fn execute(self) -> Outcome {
         let call = self.request.call.clone();
-        let first = match &self.decision {
-            Decision::Approved => match self.registry.execute(&self.tool_ctx, &call).await {
-                Ok(outcome) => vec![(call, outcome)],
-                Err(error) => vec![(
-                    call.clone(),
-                    ToolOutcome::error(format!("the tool could not run: {error}")),
-                )],
-            },
+        let session = self.tool_ctx.session.as_deref().unwrap_or_default();
+        let turn = self.request.turn as usize;
+        let pending = self
+            .journal
+            .as_ref()
+            .and_then(|journal| journal.take_pending(&approval_key(session, turn, &call.id)));
+        let (base_request, mut done, base_refused) = match pending {
+            Some((request, done, refused)) => (Some(request), done, refused),
+            None => (None, Vec::new(), 0),
+        };
+
+        let (results, refused, parked) = match &self.decision {
+            Decision::Approved => {
+                let first = match self.registry.execute(&self.tool_ctx, &call).await {
+                    Ok(outcome) => vec![(call.clone(), outcome)],
+                    Err(error) => vec![(
+                        call.clone(),
+                        ToolOutcome::error(format!("the tool could not run: {error}")),
+                    )],
+                };
+                let rest = self.request.remaining.clone();
+                if rest.is_empty() {
+                    (first, 0, None)
+                } else {
+                    let (more, refused, parked) = run_calls(
+                        self.entity,
+                        turn,
+                        &rest,
+                        usize::MAX,
+                        &self.registry,
+                        &self.tool_ctx,
+                        self.approver.as_ref(),
+                    )
+                    .await;
+                    let mut results = first;
+                    results.extend(more);
+                    (results, refused, parked)
+                }
+            }
             Decision::Rejected { reason } => {
                 let outcome =
                     ToolOutcome::error(format!("a human refused to run `{}`: {reason}", call.name));
-                return Outcome::Observed {
-                    entity: self.entity,
-                    turn: self.turn,
-                    results: vec![(call, outcome)],
-                    refused: 1,
-                    parked: None,
-                };
+                (vec![(call.clone(), outcome)], 1, None)
             }
         };
-        let rest = self.request.remaining;
-        if rest.is_empty() {
-            return Outcome::Observed {
-                entity: self.entity,
-                turn: self.turn,
-                results: first,
-                refused: 0,
-                parked: None,
-            };
+
+        if let Some(journal) = &self.journal
+            && let Some(request) = &base_request
+        {
+            done.extend(results.clone());
+            let total_refused = base_refused + refused;
+            match &parked {
+                Some(parked) => journal.record_pending(
+                    approval_key(session, turn, &parked.call.id),
+                    request.clone(),
+                    done,
+                    total_refused,
+                ),
+                None => journal.record_tools(request, done, total_refused),
+            }
         }
-        let (more, refused, parked) = run_calls(
-            self.entity,
-            self.turn,
-            &rest,
-            usize::MAX,
-            &self.registry,
-            &self.tool_ctx,
-            self.approver.as_ref(),
-        )
-        .await;
-        let mut results = first;
-        results.extend(more);
         Outcome::Observed {
             entity: self.entity,
             turn: self.turn,
@@ -1903,6 +1940,92 @@ mod tests {
             executions.load(Ordering::SeqCst),
             1,
             "replay from disk must not re-run the tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_human_approved_tool_replays_without_re_running_or_re_approving() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::replay::{Journal, ReplayProvider};
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        let counter = executions.clone();
+        registry.register(
+            FnTool::new("deploy", "ship it", move |_ctx, _call| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                ToolOutcome::ok(json!({"shipped": true}), "shipped to staging")
+            })
+            .requiring_approval(),
+        );
+
+        let journal = Journal::new();
+        let mut world = World::new();
+        world.insert_resource(registry.clone());
+        world.insert_resource(LlmService::from_provider(MockProvider::tool_then_answer(
+            "deploy",
+            json!({}),
+            "staging is live",
+        )));
+        world.insert_resource(journal.clone());
+        world.spawn_with((ReactAgent::new("ops", "ship carefully").ask("ship"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the record run parks");
+        assert_eq!(
+            only_agent(&ctx).await.status(),
+            AgentStatus::AwaitingApproval
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "nothing runs before a human approves"
+        );
+
+        {
+            let mut world = ctx.world.write().await;
+            let entity = world.single::<ReactAgent>().expect("one agent");
+            world
+                .get_mut::<ReactAgent>(entity)
+                .expect("present")
+                .approve();
+        }
+        React::new().run(ctx.clone()).await.expect("the resume run");
+        let recorded = only_agent(&ctx).await;
+        assert_eq!(recorded.status(), AgentStatus::Finished);
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "the approved tool ran once while recording"
+        );
+
+        let bytes = journal.to_bytes().expect("serialize the journal");
+        drop(journal);
+        let replay_journal = Journal::from_bytes(&bytes).expect("deserialize the journal");
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(replay_journal.clone());
+        world.insert_resource(LlmService::from_provider(ReplayProvider::new(replay_journal)));
+        world.spawn_with((ReactAgent::new("ops", "ship carefully").ask("ship"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the replay run");
+        let replayed = only_agent(&ctx).await;
+
+        assert_eq!(
+            replayed.status(),
+            AgentStatus::Finished,
+            "replay must not park waiting for a human again"
+        );
+        assert_eq!(replayed.answer(), recorded.answer());
+        assert_eq!(
+            replayed.conversation().render(),
+            recorded.conversation().render()
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "replay must feed the recorded approval result, not re-run the side effect"
         );
     }
 
