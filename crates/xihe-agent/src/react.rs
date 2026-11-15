@@ -1357,32 +1357,52 @@ fn model_event(provider: &str, response: &GenerationResponse, failed: bool) -> E
 /// back under a write lock only if the agent is still on the same turn.
 async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) {
     let service = LlmService::read(ctx).await;
-    let snapshots: Vec<(Entity, usize, ConversationWindow)> = ctx
-        .with_world(|world| {
-            world
+    let (journal, snapshots): (Option<Journal>, Vec<(Entity, usize, String, ConversationWindow)>) =
+        ctx.with_world(|world| {
+            let journal = world.resource::<Journal>().cloned();
+            let snapshots = world
                 .query::<(Entity, &ReactAgent)>()
                 .filter(|(_, agent)| {
                     agent.status.is_open()
                         && agent.conversation.turns().len() > threshold
                 })
                 .map(|(entity, agent)| {
-                    (entity, agent.spend.turns, agent.conversation.clone())
+                    (
+                        entity,
+                        agent.spend.turns,
+                        agent.name().to_string(),
+                        agent.conversation.clone(),
+                    )
                 })
-                .collect()
+                .collect();
+            (journal, snapshots)
         })
         .await;
     if snapshots.is_empty() {
         return;
     }
-    let summariser: Box<dyn Summariser> = match &service {
-        Some(service) => Box::new(crate::memory::ChatSummariser::new(service.shared())),
-        None => Box::new(HeuristicSummariser::new(6, 160)),
-    };
-    let summariser_ref = summariser.as_ref();
+    // One summariser per agent: the fold's model call carries that agent's
+    // correlation so a recorded fold replays into the right window, even when
+    // several agents fold identical transcripts in the same activation.
     let folded = futures::future::join_all(snapshots.into_iter().map(
-        |(entity, turn, mut window)| async move {
-            let result = window.fold(summariser_ref, keep_last).await;
-            (entity, turn, window, result)
+        |(entity, turn, name, mut window)| {
+            let service = service.clone();
+            let journal = journal.clone();
+            async move {
+                let summariser: Box<dyn Summariser> = match &service {
+                    Some(service) => {
+                        let mut chat = crate::memory::ChatSummariser::new(service.shared())
+                            .with_correlation(name, window.fold_count());
+                        if let Some(journal) = journal {
+                            chat = chat.with_journal(journal);
+                        }
+                        Box::new(chat)
+                    }
+                    None => Box::new(HeuristicSummariser::new(6, 160)),
+                };
+                let result = window.fold(summariser.as_ref(), keep_last).await;
+                (entity, turn, window, result)
+            }
         },
     ))
     .await;
@@ -2035,6 +2055,123 @@ mod tests {
             executions.load(Ordering::SeqCst),
             1,
             "replay must feed the recorded approval result, not re-run the side effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_folded_run_replays_without_re_summarising() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use xihe_llm::{LlmError, Provider};
+
+        use crate::replay::{Journal, ReplayProvider};
+
+        // A provider that answers generation calls (those offering tools) with
+        // a few tool rounds then an answer, and fold calls (no tools) with a
+        // fixed summary. The fold summary differs from anything the heuristic
+        // fallback would produce, so a replay that re-summarises instead of
+        // feeding the recorded one diverges.
+        struct FoldAwareProvider {
+            generations: Mutex<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for FoldAwareProvider {
+            fn id(&self) -> &str {
+                "fold-aware"
+            }
+            fn default_model(&self) -> &str {
+                "fold-aware"
+            }
+            async fn generate(
+                &self,
+                request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                if request.tools.is_empty() {
+                    return Ok(GenerationResponse::text("a folded summary of earlier turns"));
+                }
+                let mut calls = self.generations.lock().unwrap();
+                let n = *calls;
+                *calls += 1;
+                Ok(if n < 3 {
+                    GenerationResponse::default().with_tool_calls(vec![ToolCall::new(
+                        format!("c{n}"),
+                        "echo",
+                        json!({"text": format!("t{n}")}),
+                    )])
+                } else {
+                    GenerationResponse::text("all done")
+                })
+            }
+        }
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        let counter = executions.clone();
+        registry.register(
+            FnTool::new("echo", "echo it", move |_ctx, call| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                ToolOutcome::text(call.string_argument("text").unwrap_or("").to_string())
+            })
+            .with_required_string("text", "the text to echo"),
+        );
+
+        let journal = Journal::new();
+        let mut world = World::new();
+        world.insert_resource(registry.clone());
+        world.insert_resource(LlmService::from_provider(FoldAwareProvider {
+            generations: Mutex::new(0),
+        }));
+        world.insert_resource(journal.clone());
+        world.spawn_with((ReactAgent::new("scribe", "be brief").ask("go"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new()
+            .with_fold(3, 2)
+            .run(ctx.clone())
+            .await
+            .expect("the record run");
+        let recorded = only_agent(&ctx).await;
+        assert_eq!(recorded.status(), AgentStatus::Finished);
+        assert_eq!(recorded.answer(), Some("all done"));
+        assert!(
+            recorded.conversation().fold_count() > 0,
+            "the recording must actually have folded"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 3, "three tool rounds ran");
+
+        let bytes = journal.to_bytes().expect("serialize the journal");
+        drop(journal);
+        let replay_journal = Journal::from_bytes(&bytes).expect("deserialize the journal");
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(replay_journal.clone());
+        world.insert_resource(LlmService::from_provider(ReplayProvider::new(replay_journal)));
+        world.spawn_with((ReactAgent::new("scribe", "be brief").ask("go"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new()
+            .with_fold(3, 2)
+            .run(ctx.clone())
+            .await
+            .expect("the replay run");
+        let replayed = only_agent(&ctx).await;
+
+        assert_eq!(
+            replayed.status(),
+            AgentStatus::Finished,
+            "a folded recording must replay, not drift: {:?}",
+            replayed.error()
+        );
+        assert_eq!(replayed.answer(), recorded.answer());
+        assert_eq!(
+            replayed.conversation().render(),
+            recorded.conversation().render(),
+            "replay must reproduce the folded transcript turn for turn"
+        );
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            3,
+            "replay must not re-run the tools"
         );
     }
 

@@ -23,6 +23,8 @@ use xihe_memory::{
 };
 use xihe_schedule::SystemContext;
 
+use crate::replay::Journal;
+
 /// The shared memory store, kept in the world so systems find it by type.
 #[derive(Clone)]
 pub struct MemoryService(Arc<dyn MemoryStore>);
@@ -104,11 +106,17 @@ pub async fn fold_window<S: Summariser + ?Sized>(
 /// conversation that matter to the task. When the call fails, it falls back to
 /// the heuristic rather than dropping the fold, because a window that cannot be
 /// folded grows without bound.
+///
+/// Given a [`Journal`] and a correlation, the summarising call is recorded and
+/// replayed like any other model call: a replay feeds back the recorded summary
+/// instead of asking the model again, so a folded run reproduces turn for turn.
 pub struct ChatSummariser {
     client: Arc<ChatClient>,
     fallback: Box<dyn Summariser>,
     max_chars: usize,
     instructions: String,
+    journal: Option<Journal>,
+    correlation: Option<(String, usize)>,
 }
 
 impl ChatSummariser {
@@ -122,6 +130,8 @@ impl ChatSummariser {
                             Keep decisions, facts that were established, and anything \
                             still unresolved. Do not add commentary."
                 .to_string(),
+            journal: None,
+            correlation: None,
         }
     }
 
@@ -139,6 +149,21 @@ impl ChatSummariser {
         self
     }
 
+    /// Record and replay the summarising call through `journal`.
+    #[must_use]
+    pub fn with_journal(mut self, journal: Journal) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Tag the summarising call with the agent and fold index that raised it,
+    /// so two agents folding identical transcripts keep separate journal keys.
+    #[must_use]
+    pub fn with_correlation(mut self, agent: impl Into<String>, fold: usize) -> Self {
+        self.correlation = Some((agent.into(), fold));
+        self
+    }
+
     /// The model this summariser asks.
     pub fn model(&self) -> String {
         self.client.model().to_string()
@@ -151,26 +176,41 @@ impl Summariser for ChatSummariser {
         if transcript.trim().is_empty() {
             return Ok(String::new());
         }
-        let request = xihe_llm::GenerationRequest::new(self.client.model())
+        let mut request = xihe_llm::GenerationRequest::new(self.client.model())
             .with_system(self.instructions.clone())
             .with_user(transcript)
             .with_max_tokens(256);
-        match self.client.generate(&request).await {
-            Ok(response) => {
-                let text = response.content.trim().to_string();
-                if text.is_empty() {
+        if let Some((agent, fold)) = &self.correlation {
+            request = request.with_correlation(format!("{agent}::fold"), *fold);
+        }
+        // A recorded summary is fed back verbatim; only a miss asks the model,
+        // and a successful call is journaled so the next replay finds it.
+        let response = if let Some(journal) = &self.journal
+            && let Some(recorded) = journal.lookup(&request)
+        {
+            recorded
+        } else {
+            match self.client.generate(&request).await {
+                Ok(response) => {
+                    if let Some(journal) = &self.journal {
+                        journal.record(&request, &response);
+                    }
+                    response
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        reason = error.to_string(),
+                        "the model could not summarise; falling back to sentence ranking"
+                    );
                     return self.fallback.summarise(transcript).await;
                 }
-                Ok(clamp(&text, self.max_chars))
             }
-            Err(error) => {
-                tracing::warn!(
-                    reason = error.to_string(),
-                    "the model could not summarise; falling back to sentence ranking"
-                );
-                self.fallback.summarise(transcript).await
-            }
+        };
+        let text = response.content.trim().to_string();
+        if text.is_empty() {
+            return self.fallback.summarise(transcript).await;
         }
+        Ok(clamp(&text, self.max_chars))
     }
 
     fn id(&self) -> &str {
