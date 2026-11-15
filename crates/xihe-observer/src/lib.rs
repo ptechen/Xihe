@@ -154,17 +154,39 @@ impl Display for Snapshot {
 }
 
 /// The event log, stored as a world resource.
+///
+/// The retained window can be bounded with [`Observer::with_retention`] so a
+/// long-running world does not accumulate events without limit. [`Snapshot`]
+/// counters are cumulative and survive trimming.
 #[derive(Clone, Debug, Default)]
 pub struct Observer {
     events: Vec<Event>,
     next: u64,
     started: Option<Instant>,
+    retention: usize,
+    totals: Snapshot,
 }
 
 impl Observer {
     /// An empty log.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Keep at most `limit` recent events; `0` (the default) means unlimited.
+    ///
+    /// Trimming drops the oldest events from [`Observer::events`] but leaves the
+    /// cumulative [`Snapshot`] counters intact, so a bounded log still reports
+    /// lifetime totals.
+    pub fn with_retention(mut self, limit: usize) -> Self {
+        self.retention = limit;
+        self.trim();
+        self
+    }
+
+    /// The retention limit, `0` for unlimited.
+    pub fn retention(&self) -> usize {
+        self.retention
     }
 
     /// Record `kind` and return its sequence number.
@@ -174,8 +196,18 @@ impl Observer {
         }
         self.next += 1;
         let seq = self.next;
+        accumulate(&mut self.totals, &kind);
         self.events.push(Event { seq, kind });
+        self.trim();
         seq
+    }
+
+    /// Drop the oldest events beyond the retention limit.
+    fn trim(&mut self) {
+        if self.retention > 0 && self.events.len() > self.retention {
+            let excess = self.events.len() - self.retention;
+            self.events.drain(..excess);
+        }
     }
 
     /// Record a frame boundary.
@@ -234,12 +266,12 @@ impl Observer {
         })
     }
 
-    /// Every event, oldest first.
+    /// The retained events, oldest first.
     pub fn events(&self) -> &[Event] {
         &self.events
     }
 
-    /// How many events have been recorded.
+    /// How many events are retained in the log.
     pub fn len(&self) -> usize {
         self.events.len()
     }
@@ -255,42 +287,10 @@ impl Observer {
             .map_or(Duration::ZERO, |started| started.elapsed())
     }
 
-    /// Counters over the whole log.
+    /// Cumulative counters over every event ever recorded, including any that
+    /// have since been trimmed from the retained window.
     pub fn snapshot(&self) -> Snapshot {
-        let mut snapshot = Snapshot::default();
-        for event in &self.events {
-            match &event.kind {
-                EventKind::Frame { .. } => snapshot.frames += 1,
-                EventKind::System { failed, .. } => {
-                    snapshot.system_runs += 1;
-                    if *failed {
-                        snapshot.system_failures += 1;
-                    }
-                }
-                EventKind::Model {
-                    input_tokens,
-                    output_tokens,
-                    failed,
-                    ..
-                } => {
-                    snapshot.model_calls += 1;
-                    snapshot.input_tokens += input_tokens;
-                    snapshot.output_tokens += output_tokens;
-                    if *failed {
-                        snapshot.model_failures += 1;
-                    }
-                }
-                EventKind::Tool { ok, .. } => {
-                    snapshot.tool_calls += 1;
-                    if !ok {
-                        snapshot.tool_failures += 1;
-                    }
-                }
-                EventKind::Agent { .. } => snapshot.agent_events += 1,
-                EventKind::Note { .. } => {}
-            }
-        }
-        snapshot
+        self.totals
     }
 
     /// The log as lines, for a demo or a failing test.
@@ -325,6 +325,40 @@ impl Observer {
             world.insert_resource(Self::new());
         }
         world.resource_mut::<Self>().expect("just inserted")
+    }
+}
+
+/// Fold one event into the cumulative counters.
+fn accumulate(snapshot: &mut Snapshot, kind: &EventKind) {
+    match kind {
+        EventKind::Frame { .. } => snapshot.frames += 1,
+        EventKind::System { failed, .. } => {
+            snapshot.system_runs += 1;
+            if *failed {
+                snapshot.system_failures += 1;
+            }
+        }
+        EventKind::Model {
+            input_tokens,
+            output_tokens,
+            failed,
+            ..
+        } => {
+            snapshot.model_calls += 1;
+            snapshot.input_tokens += input_tokens;
+            snapshot.output_tokens += output_tokens;
+            if *failed {
+                snapshot.model_failures += 1;
+            }
+        }
+        EventKind::Tool { ok, .. } => {
+            snapshot.tool_calls += 1;
+            if !ok {
+                snapshot.tool_failures += 1;
+            }
+        }
+        EventKind::Agent { .. } => snapshot.agent_events += 1,
+        EventKind::Note { .. } => {}
     }
 }
 
@@ -386,5 +420,22 @@ mod tests {
             .to_string(),
             "model mock/m in=1 out=2 ok"
         );
+    }
+
+    #[test]
+    fn retention_bounds_the_log_but_keeps_cumulative_counts() {
+        let mut observer = Observer::new().with_retention(3);
+        for _ in 0..10 {
+            observer.model("mock", "m", 1, 1, false);
+        }
+        assert_eq!(observer.len(), 3, "only the most recent events are retained");
+        let snapshot = observer.snapshot();
+        assert_eq!(
+            snapshot.model_calls, 10,
+            "cumulative counters survive trimming: {snapshot}"
+        );
+        assert_eq!(snapshot.tokens(), 20);
+        let seqs: Vec<u64> = observer.events().iter().map(|event| event.seq).collect();
+        assert_eq!(seqs, vec![8, 9, 10], "sequence numbers stay monotonic");
     }
 }

@@ -451,7 +451,7 @@ impl ReactAgent {
     }
 
     /// Stop the task with a message that is not an [`AgentError`].
-    fn fail_with(&mut self, message: impl Into<String>) {
+    pub fn fail_with(&mut self, message: impl Into<String>) {
         self.status = AgentStatus::Failed;
         self.error = Some(message.into());
         self.awaiting = None;

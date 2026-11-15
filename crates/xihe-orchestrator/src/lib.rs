@@ -16,6 +16,7 @@ use std::fmt::{self, Display, Formatter};
 use async_trait::async_trait;
 use xihe_agent::{AgentStatus, ReactAgent};
 use xihe_core::{Entity, World};
+use xihe_observer::{EventKind, Observer};
 use xihe_schedule::{Access, System, SysResult, SystemContext, SystemError, Work};
 
 /// Why an orchestration step could not run.
@@ -54,6 +55,11 @@ pub enum OrchestratorError {
         /// Its current status.
         status: AgentStatus,
     },
+    /// No override fired and no description overlapped the task.
+    NoMatch {
+        /// The task that could not be routed.
+        task: String,
+    },
 }
 
 impl Display for OrchestratorError {
@@ -71,6 +77,7 @@ impl Display for OrchestratorError {
             Self::SourceNotFinished { name, status } => {
                 write!(f, "handoff source `{name}` is {}, not finished", status.as_str())
             }
+            Self::NoMatch { task } => write!(f, "no agent matches the task `{task}`"),
         }
     }
 }
@@ -246,6 +253,10 @@ impl Router {
     }
 
     /// The agent this task should go to, and why.
+    ///
+    /// An override wins first; otherwise the description with the most word
+    /// overlap is chosen. When nothing overlaps and no override fires this
+    /// returns [`OrchestratorError::NoMatch`] rather than guessing an agent.
     pub fn route<'a>(
         &self,
         task: &str,
@@ -271,6 +282,11 @@ impl Router {
             }
         }
         let (entry, score) = best.expect("the roster was checked");
+        if score == 0 {
+            return Err(OrchestratorError::NoMatch {
+                task: task.to_string(),
+            });
+        }
         Ok((entry, format!("description overlap {score}")))
     }
 
@@ -598,6 +614,37 @@ async fn mark_agents_busy(ctx: &SystemContext) {
         .await;
 }
 
+/// Stop the branches a [`Reduce::First`] reduction no longer needs, so they do
+/// not keep spending after the answer is already in hand. Each cancelled branch
+/// is failed with a diagnostic reason and recorded in the [`Observer`], mirroring
+/// how the runtime reports stopped agents.
+async fn cancel_open_branches(ctx: &SystemContext, fan: &FanOut, roster: &Roster) {
+    ctx.with_world_mut(|world| {
+        let mut events = Vec::new();
+        for name in &fan.agents {
+            let Some(entry) = roster.get(name) else {
+                continue;
+            };
+            let Some(agent) = world.get_mut::<ReactAgent>(entry.entity) else {
+                continue;
+            };
+            if agent.status() != AgentStatus::Idle && agent.status().is_open() {
+                agent.fail_with("cancelled: fan-out reduced with First".to_string());
+                events.push(EventKind::Agent {
+                    name: agent.name().to_string(),
+                    status: agent.status().as_str().to_string(),
+                });
+            }
+        }
+        if let Some(observer) = world.resource_mut::<Observer>() {
+            for event in events {
+                observer.record(event);
+            }
+        }
+    })
+    .await;
+}
+
 /// A one-shot system that routes a task to the best-matching agent.
 ///
 /// Add it before [`xihe_agent::React`] in the schedule so the chosen agent
@@ -793,6 +840,9 @@ impl System for FanOutTask {
                     world.insert_resource(FanOutResult(answer));
                 })
                 .await;
+                if self.fan.reduce == Reduce::First {
+                    cancel_open_branches(&ctx, &self.fan, &self.roster).await;
+                }
                 self.done = true;
                 Ok(())
             }
@@ -954,6 +1004,19 @@ mod tests {
             .route("please write a short note", &roster)
             .expect("scored");
         assert_eq!(entry.name, "scribe");
+    }
+
+    #[test]
+    fn routing_a_task_that_matches_nothing_is_an_error() {
+        let mut world = World::new();
+        let roster = team(&mut world);
+        let error = Router::new()
+            .route("completely unrelated zzz", &roster)
+            .expect_err("zero overlap must not silently pick the first agent");
+        assert!(
+            matches!(error, OrchestratorError::NoMatch { .. }),
+            "a task that matches no description is reported, not guessed: {error:?}"
+        );
     }
 
     #[test]
@@ -1126,6 +1189,7 @@ mod tests {
         ));
     }
 
+    use xihe_observer::{EventKind, Observer};
     use xihe_schedule::{SystemContext, WorldHandle};
 
     #[tokio::test]
@@ -1194,6 +1258,44 @@ mod tests {
             .await
             .expect("a result");
         assert_eq!(result.0, "scribe: a\nops: b");
+    }
+
+    #[tokio::test]
+    async fn first_cancels_the_siblings_it_no_longer_needs() {
+        let mut world = World::new();
+        world.insert_resource(Observer::new());
+        let roster = team(&mut world);
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        let mut system = FanOutTask::new(
+            FanOut::new(["scribe", "ops"]).with_reduce(Reduce::First),
+            roster.clone(),
+            "review",
+        );
+        system.run(ctx.clone()).await.expect("dispatched");
+        // scribe (the first branch) finishes; ops is still open and spending.
+        ctx.with_world_mut(|world| finish(world, "scribe", &roster, "the first answer"))
+            .await;
+        system.run(ctx.clone()).await.expect("reduced");
+
+        let world = ctx.world.read().await;
+        let ops = world
+            .get::<ReactAgent>(roster.get("ops").unwrap().entity)
+            .unwrap();
+        assert!(
+            ops.status().is_terminal(),
+            "the unneeded sibling is stopped, not left spending: {}",
+            ops.status().as_str()
+        );
+        assert_eq!(world.resource::<FanOutResult>().unwrap().0, "the first answer");
+        let observer = world.resource::<Observer>().unwrap();
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Agent { name, status } if name == "ops" && status == "failed"
+            )),
+            "the cancellation is visible in the log: {}",
+            observer.render()
+        );
     }
 
     #[tokio::test]

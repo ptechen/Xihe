@@ -13,6 +13,7 @@ xihe-schedule.workspace = true
 xihe-llm.workspace = true
 xihe-agent.workspace = true
 xihe-memory.workspace = true
+xihe-observer.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

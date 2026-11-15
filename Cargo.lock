@@ -1455,6 +1455,7 @@ dependencies = [
  "xihe-core",
  "xihe-llm",
  "xihe-memory",
+ "xihe-observer",
  "xihe-schedule",
 ]
 
