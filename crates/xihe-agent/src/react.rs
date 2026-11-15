@@ -1478,9 +1478,19 @@ async fn stop_agents(ctx: &SystemContext) {
             .filter(|(_, agent)| agent.status != AgentStatus::Idle && agent.status.is_open())
             .map(|(entity, _)| entity)
             .collect();
+        let mut events = Vec::new();
         for entity in busy {
             if let Some(agent) = world.get_mut::<ReactAgent>(entity) {
                 agent.fail_with(format!("stopped: {reason}"));
+                events.push(EventKind::Agent {
+                    name: agent.name().to_string(),
+                    status: agent.status.as_str().to_string(),
+                });
+            }
+        }
+        if let Some(observer) = world.resource_mut::<Observer>() {
+            for event in events {
+                observer.record(event);
             }
         }
     })

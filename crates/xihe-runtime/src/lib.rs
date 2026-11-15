@@ -30,11 +30,6 @@ pub enum StopReason {
         /// The reason that was given, when one was.
         reason: String,
     },
-    /// A system returned an error.
-    Failed {
-        /// What the system reported.
-        message: String,
-    },
 }
 
 impl Display for StopReason {
@@ -43,7 +38,6 @@ impl Display for StopReason {
             Self::Settled => write!(f, "every agent settled"),
             Self::FrameBudget { frames } => write!(f, "stopped after {frames} frames"),
             Self::Stopped { reason } => write!(f, "stopped: {reason}"),
-            Self::Failed { message } => write!(f, "a system failed: {message}"),
         }
     }
 }
@@ -208,9 +202,13 @@ impl Driver {
             let started = std::time::Instant::now();
             if let Err(error) = app.schedule.execute(&ctx).await {
                 if self.observe {
+                    let elapsed = started.elapsed();
                     let message = error.to_string();
+                    let name = error.name.clone();
                     ctx.with_world_mut(|world| {
-                        Observer::ensure(world).note("driver", message);
+                        let observer = Observer::ensure(world);
+                        observer.system(name, true, elapsed);
+                        observer.note("driver", message);
                     })
                     .await;
                 }
@@ -617,6 +615,99 @@ mod tests {
                 xihe_observer::EventKind::System { name, failed: true, .. } if name == "boom"
             )),
             "the failing system is named in the log: {}",
+            observer.render()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fail_fast_failure_is_named_in_the_observer() {
+        let mut app = app_with_a_panicking_system().await;
+        let result = app.run(4).await;
+        assert!(result.is_err(), "fail-fast remains the default");
+
+        let observer = app.world().resource::<Observer>().expect("observer");
+        let snapshot = observer.snapshot();
+        assert!(
+            snapshot.system_failures >= 1,
+            "a fail-fast failure must be observable: {snapshot}"
+        );
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                xihe_observer::EventKind::System { name, failed: true, .. } if name == "boom"
+            )),
+            "the failing system is named in the log: {}",
+            observer.render()
+        );
+    }
+
+    /// A provider that parks inside `generate` until released, so a test can
+    /// signal shutdown while a call is genuinely in flight.
+    struct BlockingProvider {
+        started: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl xihe_llm::Provider for BlockingProvider {
+        fn id(&self) -> &str {
+            "blocking"
+        }
+
+        fn default_model(&self) -> &str {
+            "blocking"
+        }
+
+        async fn generate(
+            &self,
+            _request: &xihe_llm::GenerationRequest,
+        ) -> Result<xihe_llm::GenerationResponse, xihe_llm::LlmError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(xihe_llm::GenerationResponse::text("done"))
+        }
+    }
+
+    #[tokio::test]
+    async fn stopping_the_runtime_records_the_failed_agents_in_the_observer() {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let provider = BlockingProvider {
+            started: started.clone(),
+            release: release.clone(),
+        };
+
+        let mut app = App::new();
+        app.add(LlmPlugin::new(LlmService::from_provider(provider)))
+            .await
+            .expect("llm");
+        app.add(ToolsPlugin).await.expect("tools");
+        app.add(ReactPlugin::new(4)).await.expect("react");
+        app.world_mut()
+            .spawn_with((ReactAgent::new("scribe", "be brief").ask("hi"),));
+
+        // Stop once the agent is mid-generation, so React's own shutdown path
+        // (not the driver's top-of-frame check) is what fails the agent.
+        let stop = app.stop_token().clone();
+        let signaller = tokio::spawn(async move {
+            started.notified().await;
+            stop.stop("halt");
+        });
+
+        app.run(4).await.expect("ran");
+        signaller.await.expect("signaller");
+
+        let world = app.world();
+        let agent = world.query::<&ReactAgent>().next().expect("an agent");
+        assert_eq!(agent.status(), AgentStatus::Failed);
+        let observer = world.resource::<Observer>().expect("observer");
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                xihe_observer::EventKind::Agent { name, status }
+                    if name == "scribe" && status == "failed"
+            )),
+            "the stop-induced failure is visible in the log: {}",
             observer.render()
         );
     }
