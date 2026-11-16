@@ -1362,40 +1362,12 @@ name = "xihe"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "serde_json",
- "tokio",
- "xihe-agent",
- "xihe-core",
- "xihe-llm",
- "xihe-memory",
- "xihe-observer",
- "xihe-orchestrator",
- "xihe-runtime",
- "xihe-schedule",
-]
-
-[[package]]
-name = "xihe-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
  "futures",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
- "xihe-core",
- "xihe-llm",
- "xihe-memory",
- "xihe-observer",
- "xihe-schedule",
-]
-
-[[package]]
-name = "xihe-core"
-version = "0.1.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -1406,86 +1378,6 @@ dependencies = [
  "tokio",
  "tracing",
  "xihe",
-]
-
-[[package]]
-name = "xihe-llm"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "xihe-memory"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tokio",
- "xihe-core",
- "xihe-llm",
-]
-
-[[package]]
-name = "xihe-observer"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "xihe-core",
-]
-
-[[package]]
-name = "xihe-orchestrator"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "xihe-agent",
- "xihe-core",
- "xihe-llm",
- "xihe-memory",
- "xihe-observer",
- "xihe-schedule",
-]
-
-[[package]]
-name = "xihe-runtime"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "serde_json",
- "tokio",
- "tracing",
- "xihe-agent",
- "xihe-core",
- "xihe-llm",
- "xihe-memory",
- "xihe-observer",
- "xihe-schedule",
-]
-
-[[package]]
-name = "xihe-schedule"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "serde",
- "tokio",
- "tracing",
- "xihe-core",
 ]
 
 [[package]]

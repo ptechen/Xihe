@@ -7,14 +7,17 @@
 //! 而非分散在多个独立的遍次之间。
 
 use xihe::prelude::*;
-use xihe::{Handoff, HandoffWhenFinished, MockProvider, Reply, Roster, RouteTask, Router, SystemSpec};
+use xihe::{
+    Handoff, HandoffWhenFinished, MockProvider, Reply, Roster, RouteTask, Router, SystemSpec,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
     app.add(ToolsPlugin).await?;
     app.add(ObserverPlugin).await?;
-    app.add(LlmPlugin::new(LlmService::from_provider(script()))).await?;
+    app.add(LlmPlugin::new(LlmService::from_provider(script())))
+        .await?;
 
     app.world_mut()
         .resource_mut::<ToolRegistry>()

@@ -2,19 +2,20 @@
 
 Xihe (羲和) is a tokio-based entity-component-system for building agents. An agent is a component on an entity. A schedule runs systems against the world. The ReAct loop is one of those systems: it reads an agent, calls a model, runs tools, and writes the result back, without holding the world lock across the call.
 
-## Crates
+## Modules
 
-| Crate | What it owns |
+Everything lives in the `xihe` crate. Modules carry an `ecs_` or `agent_` prefix by domain; `agent` itself is the ReAct core.
+
+| Module | What it owns |
 | --- | --- |
-| `xihe-core` | Entities, components, resources, queries |
-| `xihe-schedule` | Systems, stages, deferred commands, per-system tracing spans, the stop token |
-| `xihe-llm` | Chat requests, providers, a scripted mock |
-| `xihe-memory` | Embeddings, a vector store, conversation windows |
-| `xihe-agent` | Tools, guardrails, structured output, the ReAct loop |
-| `xihe-orchestrator` | Handoffs, routing, a supervisor, fan-out |
-| `xihe-observer` | An event log and a snapshot |
-| `xihe-runtime` | Plugins, the app, the frame driver |
-| `xihe` | The facade |
+| `xihe::ecs_core` | Entities, components, resources, queries |
+| `xihe::ecs_schedule` | Systems, stages, deferred commands, per-system tracing spans, the stop token |
+| `xihe::agent_llm` | Chat requests, providers, a scripted mock |
+| `xihe::agent_memory` | Embeddings, a vector store, conversation windows |
+| `xihe::agent` | Tools, guardrails, structured output, the ReAct loop |
+| `xihe::agent_orchestrator` | Handoffs, routing, a supervisor, fan-out |
+| `xihe::agent_observer` | An event log and a snapshot |
+| `xihe::agent_runtime` | Plugins, the app, the frame driver |
 
 ## Run the demo
 
@@ -65,7 +66,7 @@ app.add_system(SystemSpec::new("handoff", HandoffWhenFinished::new(
 assert_eq!(app.run(8).await?, StopReason::Settled);
 ```
 
-`cargo run -p xihe-demo` runs this team end to end; `crates/xihe/tests/full_stack.rs`
+`cargo run -p xihe-demo` runs this team end to end; `crates/xihe-ecs-agent/tests/full_stack.rs`
 asserts on it through the facade alone.
 
 ## Capabilities
@@ -80,7 +81,7 @@ asserts on it through the facade alone.
 
 ## Features
 
-- `openai` — the HTTP provider in `xihe-llm`
+- `openai` — the HTTP provider in `xihe::agent_llm`
 - `hitl` — a terminal approver for tools that require a person
 - `persist` — JSONL snapshots of a memory store
 
