@@ -22,6 +22,8 @@ pub enum LlmError {
         status: u16,
         /// 响应体，或从中提取的 `error.message`。
         message: String,
+        /// 服务器指明时应等待多久（可重试状态如 503 常带 `Retry-After`）。
+        retry_after: Option<Duration>,
     },
 
     /// 凭据被拒绝；重试无济于事。
@@ -101,6 +103,7 @@ impl LlmError {
         Self::Api {
             status,
             message: message.into(),
+            retry_after: None,
         }
     }
 
@@ -142,7 +145,7 @@ impl LlmError {
     /// 提供方要求等待多久（若它指明了）。
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after } => *retry_after,
+            Self::RateLimited { retry_after } | Self::Api { retry_after, .. } => *retry_after,
             Self::Exhausted { last, .. } => last.retry_after(),
             _ => None,
         }
@@ -188,7 +191,7 @@ impl Display for LlmError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport { message } => write!(f, "transport failure: {message}"),
-            Self::Api { status, message } => {
+            Self::Api { status, message, .. } => {
                 write!(f, "provider returned {status}: {}", clipped(message))
             }
             Self::Auth { message } => write!(f, "authentication failed: {message}"),

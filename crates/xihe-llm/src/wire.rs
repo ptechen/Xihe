@@ -302,14 +302,14 @@ pub fn parse_stream_event(data: &str) -> Result<Option<StreamChunk>, LlmError> {
 /// 对一个非成功的 HTTP 应答分类。
 ///
 /// `retry_after` 是服务器的 `Retry-After` 提示，由传输层从响应头部解析；
-/// 它只在 429 上携带，使 [`crate::ChatClient`] 能等待服务器要求的延迟，
-/// 而非自己的退避。
+/// 429 与可重试的 `Api` 状态（如 503）都携带它，使 [`crate::ChatClient`]
+/// 能等待服务器要求的延迟，而非自己的退避。
 pub fn error_from_status(status: u16, body: String, retry_after: Option<Duration>) -> LlmError {
     let message = extract_api_message(&body).unwrap_or_else(|| body.trim().to_string());
     match status {
         401 | 403 => LlmError::Auth { message },
         429 => LlmError::RateLimited { retry_after },
-        _ => LlmError::Api { status, message },
+        _ => LlmError::Api { status, message, retry_after },
     }
 }
 

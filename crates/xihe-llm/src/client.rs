@@ -8,16 +8,24 @@ use crate::message::{ChatMessage, GenerationParams, GenerationResponse};
 use crate::provider::{DynProvider, Provider, StreamBox};
 use crate::request::GenerationRequest;
 
-/// 由挂钟的亚秒部分导出的 `0.0..1.0` 区间内的散布值。
+/// 导出 `0.0..1.0` 区间内的散布值，用于重试抖动。
 ///
 /// 重试抖动只需让并发调用者去相关，因此一个廉价、无依赖的来源
-/// 胜过引入一个随机数 crate。
+/// 胜过引入一个随机数 crate。单看挂钟不够：某些平台（如 macOS）
+/// 时钟只有微秒精度，`subsec_nanos` 恒为 1000 的倍数，取 `% 1000`
+/// 会永远得 0；并发调用者也可能落在同一时刻。混入一个进程内递增
+/// 计数，保证每次调用取值不同，真正打散重试延迟。
 fn sub_second_fraction() -> f32 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let tick = CALLS.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.subsec_nanos())
+        .map(|elapsed| u64::from(elapsed.subsec_nanos()))
         .unwrap_or(0);
-    (nanos % 1_000) as f32 / 1_000.0
+    // Knuth 乘法散列把计数与纳秒混合，避免低位规律性。
+    let mixed = nanos.wrapping_add(tick.wrapping_mul(2_654_435_761));
+    (mixed % 1_000_000) as f32 / 1_000_000.0
 }
 
 /// 客户端如何重试瞬时失败。
@@ -79,6 +87,11 @@ impl RetryPolicy {
 
     /// `attempt` 之前的延迟（从 1 起：第一次失败后的延迟）。
     pub fn delay_for(&self, attempt: u32) -> Duration {
+        self.delay_with_fraction(attempt, sub_second_fraction())
+    }
+
+    /// 给定抖动分数（0.0..1.0）的延迟计算，与挂钟来源解耦以便确定性地测试。
+    fn delay_with_fraction(&self, attempt: u32, fraction: f32) -> Duration {
         let exponent = attempt.saturating_sub(1);
         let base = self.initial_backoff.as_secs_f64() * f64::from(self.factor).powi(exponent as i32);
         // 转换前先以秒为单位封顶：很大的尝试索引会让
@@ -87,8 +100,10 @@ impl RetryPolicy {
         let capped = base.min(self.max_backoff.as_secs_f64()).max(0.0);
         let mut delay = Duration::from_secs_f64(capped);
         if self.jitter > 0.0 && !delay.is_zero() {
-            let fraction = sub_second_fraction();
             delay = delay.mul_f32(1.0 + self.jitter * fraction);
+            // jitter 在封顶之后乘上去会突破 max_backoff；再封一次顶，
+            // 使该字段始终是「任何单次延迟的上界」这一契约成立。
+            delay = delay.min(self.max_backoff);
         }
         delay
     }
@@ -410,6 +425,44 @@ mod tests {
     }
 
     #[test]
+    fn jitter_source_actually_varies_across_calls() {
+        // 抖动的目的是去相关重试延迟。若来源恒为常数（例如粗精度时钟下
+        // subsec_nanos % 1000 恒为 0），jitter 形同虚设，惊群依旧。
+        let first = sub_second_fraction();
+        let mut varied = false;
+        for _ in 0..64 {
+            let fraction = sub_second_fraction();
+            assert!((0.0..1.0).contains(&fraction), "fraction out of band: {fraction}");
+            if fraction != first {
+                varied = true;
+            }
+        }
+        assert!(varied, "jitter source must vary across calls, not be a constant");
+    }
+
+    #[test]
+    fn jitter_never_exceeds_the_max_backoff_ceiling() {
+        // max_backoff 文档承诺它是「任何单次延迟的上界」。基础值封顶后再乘
+        // jitter 会突破该上限：400ms 封顶到 250ms，再 *(1+1.0*0.999) 可达 ~500ms。
+        // 用注入分数而非挂钟，因为某些平台时钟精度让 sub_second_fraction 恒为 0。
+        let policy = RetryPolicy {
+            initial_backoff: Duration::from_millis(100),
+            factor: 2.0,
+            max_backoff: Duration::from_millis(250),
+            jitter: 1.0,
+            ..RetryPolicy::default()
+        };
+        for attempt in 1..=8 {
+            let delay = policy.delay_with_fraction(attempt, 0.999);
+            assert!(
+                delay <= policy.max_backoff,
+                "attempt {attempt}: jitter pushed {delay:?} past max_backoff {:?}",
+                policy.max_backoff
+            );
+        }
+    }
+
+    #[test]
     fn no_policy_means_a_single_attempt() {
         let policy = RetryPolicy::none();
         assert_eq!(policy.attempts, 1);
@@ -497,6 +550,34 @@ mod tests {
         let response = tokio::time::timeout(
             Duration::from_secs(2),
             client.generate_streamed(&GenerationRequest::new("m").with_user("hi")),
+        )
+        .await
+        .expect("the server hint, not the local backoff, set the delay")
+        .unwrap();
+        assert_eq!(response.content, "ok");
+    }
+
+    #[tokio::test]
+    async fn generate_honors_retry_after_on_a_retryable_5xx() {
+        // 503 可重试，服务器常带 Retry-After。若分类时丢弃该提示，
+        // 客户端会睡 30s 本地退避并在此超时；尊重提示则立即重试。
+        let provider = MockProvider::with_script([
+            Reply::fail(crate::error_from_status(
+                503,
+                "{}".to_string(),
+                Some(Duration::ZERO),
+            )),
+            Reply::text("ok"),
+        ]);
+        let client = ChatClient::from_provider(provider).with_policy(RetryPolicy {
+            attempts: 3,
+            initial_backoff: Duration::from_secs(30),
+            max_backoff: Duration::from_secs(30),
+            ..RetryPolicy::default()
+        });
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.generate(&GenerationRequest::new("m").with_user("hi")),
         )
         .await
         .expect("the server hint, not the local backoff, set the delay")
