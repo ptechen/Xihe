@@ -46,6 +46,15 @@ pub enum EventKind {
         /// 工具是否报告成功。
         ok: bool,
     },
+    /// 一次工具调用在运行前被策略拦截：预算耗尽、未知工具、
+    /// 人工拒绝或参数校验不过。它从未运行，故区别于 [`EventKind::Tool`]
+    /// 的失败，单独计数以免污染工具可靠性信号。
+    Refused {
+        /// 工具名。
+        name: String,
+        /// 拦截原因，将发回给模型。
+        reason: String,
+    },
     /// 一个智能体改变了状态。
     Agent {
         /// 智能体名。
@@ -89,6 +98,7 @@ impl Display for EventKind {
             Self::Tool { name, ok } => {
                 write!(f, "tool {name} {}", if *ok { "ok" } else { "failed" })
             }
+            Self::Refused { name, reason } => write!(f, "tool {name} refused: {reason}"),
             Self::Agent { name, status } => write!(f, "agent {name} -> {status}"),
             Self::Note { source, text } => write!(f, "{source}: {text}"),
         }
@@ -125,8 +135,12 @@ pub struct Snapshot {
     pub tool_calls: u64,
     /// 失败的工具调用次数。
     pub tool_failures: u64,
+    /// 运行前被策略拦截的工具调用次数（预算、未知、人工拒绝、校验）。
+    pub tool_refusals: u64,
     /// 智能体状态变更次数。
     pub agent_events: u64,
+    /// 以失败告终的智能体状态变更次数。
+    pub agent_failures: u64,
 }
 
 impl Snapshot {
@@ -140,7 +154,7 @@ impl Display for Snapshot {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "frames={} systems={}/{} models={}/{} tokens={} tools={}/{}",
+            "frames={} systems={}/{} models={}/{} tokens={} tools={}/{} refused={} agents={}/{}",
             self.frames,
             self.system_runs,
             self.system_failures,
@@ -148,7 +162,10 @@ impl Display for Snapshot {
             self.model_failures,
             self.tokens(),
             self.tool_calls,
-            self.tool_failures
+            self.tool_failures,
+            self.tool_refusals,
+            self.agent_events,
+            self.agent_failures
         )
     }
 }
@@ -313,6 +330,9 @@ impl Observer {
             "output_tokens": snapshot.output_tokens,
             "tool_calls": snapshot.tool_calls,
             "tool_failures": snapshot.tool_failures,
+            "tool_refusals": snapshot.tool_refusals,
+            "agent_events": snapshot.agent_events,
+            "agent_failures": snapshot.agent_failures,
             "events": self.events.iter().map(|event| event.kind.to_string()).collect::<Vec<_>>(),
         })
     }
@@ -355,7 +375,13 @@ fn accumulate(snapshot: &mut Snapshot, kind: &EventKind) {
                 snapshot.tool_failures += 1;
             }
         }
-        EventKind::Agent { .. } => snapshot.agent_events += 1,
+        EventKind::Refused { .. } => snapshot.tool_refusals += 1,
+        EventKind::Agent { status, .. } => {
+            snapshot.agent_events += 1;
+            if status == "failed" {
+                snapshot.agent_failures += 1;
+            }
+        }
         EventKind::Note { .. } => {}
     }
 }
@@ -435,5 +461,21 @@ mod tests {
         assert_eq!(snapshot.tokens(), 20);
         let seqs: Vec<u64> = observer.events().iter().map(|event| event.seq).collect();
         assert_eq!(seqs, vec![8, 9, 10], "sequence numbers stay monotonic");
+    }
+
+    #[test]
+    fn agent_failures_are_counted_cumulatively() {
+        let mut observer = Observer::new().with_retention(2);
+        for _ in 0..5 {
+            observer.agent("worker", "failed");
+        }
+        observer.agent("scribe", "finished");
+        let json = observer.to_json();
+        assert_eq!(
+            json["agent_failures"], 5,
+            "cumulative agent failures must survive trimming: {json}"
+        );
+        assert_eq!(json["agent_events"], 6, "all agent status changes are counted");
+        assert_eq!(observer.snapshot().agent_failures, 5);
     }
 }

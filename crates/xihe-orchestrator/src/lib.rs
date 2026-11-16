@@ -694,7 +694,13 @@ impl System for RouteTask {
         let roster = self.roster.clone();
         let task = self.task.clone();
         let result = ctx
-            .with_world_mut(move |world| router.dispatch(world, &roster, &task))
+            .with_world_mut(move |world| -> Result<(String, String), OrchestratorError> {
+                let (name, reason) = router.dispatch(world, &roster, &task)?;
+                if let Some(observer) = world.resource_mut::<Observer>() {
+                    observer.note("router", format!("routed task to `{name}`: {reason}"));
+                }
+                Ok((name, reason))
+            })
             .await;
         match result {
             Ok((name, reason)) => {
@@ -746,7 +752,7 @@ impl System for HandoffWhenFinished {
         let handoff = self.handoff.clone();
         let roster = self.roster.clone();
         let result = ctx
-            .with_world_mut(move |world| {
+            .with_world_mut(move |world| -> Result<Option<String>, OrchestratorError> {
                 let from = roster.get(&handoff.from).ok_or_else(|| {
                     OrchestratorError::UnknownAgent {
                         name: handoff.from.clone(),
@@ -760,7 +766,14 @@ impl System for HandoffWhenFinished {
                 if source.status() != AgentStatus::Finished {
                     return Ok(None);
                 }
-                handoff.apply(world, &roster).map(Some)
+                let question = handoff.apply(world, &roster)?;
+                if let Some(observer) = world.resource_mut::<Observer>() {
+                    observer.note(
+                        "handoff",
+                        format!("`{}` handed off to `{}`", handoff.from, handoff.to),
+                    );
+                }
+                Ok(Some(question))
             })
             .await;
         match result {
@@ -835,7 +848,15 @@ impl System for FanOutTask {
                     return Ok(None);
                 }
                 match fan.reduce(world, &roster) {
-                    Ok(answer) => Ok(Some(answer)),
+                    Ok(answer) => {
+                        if let Some(observer) = world.resource_mut::<Observer>() {
+                            observer.note(
+                                "fan-out",
+                                format!("reduced {} branches via {:?}", fan.agents.len(), fan.reduce),
+                            );
+                        }
+                        Ok(Some(answer))
+                    }
                     Err(OrchestratorError::Incomplete { .. }) => Ok(None),
                     Err(error) => Err(error),
                 }
@@ -1338,5 +1359,87 @@ mod tests {
             let agent = world.get::<ReactAgent>(roster.get(name).unwrap().entity).unwrap();
             assert_eq!(agent.status(), AgentStatus::Working);
         }
+    }
+
+    #[tokio::test]
+    async fn route_task_records_its_decision_in_the_observer() {
+        let mut world = World::new();
+        world.insert_resource(Observer::new());
+        let roster = team(&mut world);
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        let mut system = RouteTask::new(
+            Router::new().when_contains("prod", "ops"),
+            roster.clone(),
+            "push to prod",
+        );
+        system.run(ctx.clone()).await.expect("routed");
+        let world = ctx.world.read().await;
+        let observer = world.resource::<Observer>().unwrap();
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Note { source, text }
+                    if source == "router" && text.contains("ops") && text.contains("prod")
+            )),
+            "the routing decision is auditable, not just tracing: {}",
+            observer.render()
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_records_its_decision_in_the_observer() {
+        let mut world = World::new();
+        world.insert_resource(Observer::new());
+        let roster = team(&mut world);
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        let mut system = HandoffWhenFinished::new(
+            Handoff::new("scribe", "ops", "act on this"),
+            roster.clone(),
+        );
+        ctx.with_world_mut(|world| finish(world, "scribe", &roster, "the export is nightly"))
+            .await;
+        system.run(ctx.clone()).await.expect("handed off");
+        let world = ctx.world.read().await;
+        let observer = world.resource::<Observer>().unwrap();
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Note { source, text }
+                    if source == "handoff" && text.contains("scribe") && text.contains("ops")
+            )),
+            "the handoff is auditable, not just tracing: {}",
+            observer.render()
+        );
+    }
+
+    #[tokio::test]
+    async fn fan_out_records_its_reduction_in_the_observer() {
+        let mut world = World::new();
+        world.insert_resource(Observer::new());
+        let roster = team(&mut world);
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        let mut system = FanOutTask::new(
+            FanOut::new(["scribe", "ops"]).with_reduce(Reduce::Concat),
+            roster.clone(),
+            "review",
+        );
+        system.run(ctx.clone()).await.expect("dispatched");
+        ctx.with_world_mut(|world| {
+            finish(world, "scribe", &roster, "a");
+            finish(world, "ops", &roster, "b");
+        })
+        .await;
+        system.run(ctx.clone()).await.expect("reduced");
+        let world = ctx.world.read().await;
+        let observer = world.resource::<Observer>().unwrap();
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Note { source, text }
+                    if source == "fan-out" && text.contains("Concat") && text.contains("2")
+            )),
+            "the reduction strategy and branch count are auditable: {}",
+            observer.render()
+        );
     }
 }

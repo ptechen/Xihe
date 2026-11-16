@@ -125,6 +125,7 @@ pub struct ReactAgent {
     name: String,
     instructions: String,
     model: Option<String>,
+    service: Option<LlmService>,
     status: AgentStatus,
     conversation: ConversationWindow,
     guardrails: Guardrails,
@@ -147,6 +148,7 @@ impl ReactAgent {
             name: name.into(),
             instructions: instructions.into(),
             model: None,
+            service: None,
             status: AgentStatus::Idle,
             conversation: ConversationWindow::new(),
             guardrails: Guardrails::new(),
@@ -167,6 +169,17 @@ impl ReactAgent {
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    /// 自带一个提供方客户端，覆盖世界默认的 [`LlmService`]。
+    ///
+    /// 多提供方基础架构：每个智能体可绑不同厂商/endpoint/重试策略，
+    /// 世界默认只是不自带客户端者的回退。模型名仍可由 [`Self::with_model`]
+    /// 在此提供方内进一步覆盖。
+    #[must_use]
+    pub fn with_service(mut self, service: LlmService) -> Self {
+        self.service = Some(service);
         self
     }
 
@@ -831,10 +844,12 @@ fn step_for(
     if let Err(error) = agent.guardrails.check(&agent.spend, agent.elapsed()) {
         return Some(Step::Fail { entity, error });
     }
-    let Some(service) = service.clone() else {
+    let Some(service) = agent.service.clone().or_else(|| service.clone()) else {
         return Some(Step::Fail {
             entity,
-            error: AgentError::config("this world has no LlmService resource for the agent to ask"),
+            error: AgentError::config(
+                "no LlmService for the agent to ask: neither its own nor a world default",
+            ),
         });
     };
     let descriptors = agent.guardrails.filter_tools(registry.descriptors());
@@ -1128,7 +1143,7 @@ async fn run_calls(
                 let outcome = registry
                     .execute(&ctx, call)
                     .await
-                    .unwrap_or_else(|error| ToolOutcome::error(error.to_string()));
+                    .unwrap_or_else(|error| ToolOutcome::refused(error.to_string()));
                 (call.clone(), outcome)
             }
         }))
@@ -1143,7 +1158,7 @@ async fn run_calls(
             refused += 1;
             results.push((
                 call.clone(),
-                ToolOutcome::error(format!(
+                ToolOutcome::refused(format!(
                     "`{}` was not run: this task has used its tool-call budget",
                     call.name
                 )),
@@ -1154,7 +1169,7 @@ async fn run_calls(
             refused += 1;
             results.push((
                 call.clone(),
-                ToolOutcome::error(format!("unknown tool `{}`", call.name)),
+                ToolOutcome::refused(format!("unknown tool `{}`", call.name)),
             ));
             continue;
         }
@@ -1177,7 +1192,7 @@ async fn run_calls(
                 refused += 1;
                 results.push((
                     call.clone(),
-                    ToolOutcome::error(decision.transcript_text()),
+                    ToolOutcome::refused(decision.transcript_text()),
                 ));
                 continue;
             }
@@ -1185,7 +1200,7 @@ async fn run_calls(
         let problems = registry.validate(call);
         if !problems.is_empty() {
             refused += 1;
-            results.push((call.clone(), ToolOutcome::error(problems.join("; "))));
+            results.push((call.clone(), ToolOutcome::refused(problems.join("; "))));
             continue;
         }
         match registry.execute(tool_ctx, call).await {
@@ -1195,7 +1210,7 @@ async fn run_calls(
             }
             Err(error) => {
                 refused += 1;
-                results.push((call.clone(), ToolOutcome::error(error.to_string())));
+                results.push((call.clone(), ToolOutcome::refused(error.to_string())));
             }
         }
     }
@@ -1216,9 +1231,7 @@ async fn apply(ctx: SystemContext, outcome: Outcome) -> bool {
     };
     ctx.with_world_mut(move |world| {
         let entity = outcome_entity(&outcome);
-        let provider = LlmService::from_world(world)
-            .map(|service| service.provider_id())
-            .unwrap_or_default();
+        let world_service = LlmService::from_world(world);
         let Some(agent) = world.get_mut::<ReactAgent>(entity) else {
             tracing::debug!(%entity, "the agent the step was planned for is gone");
             return false;
@@ -1232,6 +1245,15 @@ async fn apply(ctx: SystemContext, outcome: Outcome) -> bool {
             );
             return false;
         }
+        let service = agent.service.clone().or(world_service);
+        let provider = service
+            .as_ref()
+            .map(|service| service.provider_id())
+            .unwrap_or_default();
+        let default_model = service
+            .as_ref()
+            .map(|service| service.model())
+            .unwrap_or_default();
         let old_status = agent.status;
         let mut events = Vec::new();
         let wrote = match outcome {
@@ -1277,10 +1299,17 @@ async fn apply(ctx: SystemContext, outcome: Outcome) -> bool {
                 agent.record_response(&response);
                 events.push(model_event(&provider, &response, false));
                 for (call, outcome) in &results {
-                    events.push(EventKind::Tool {
-                        name: call.name.clone(),
-                        ok: outcome.ok,
-                    });
+                    if outcome.is_refused() {
+                        events.push(EventKind::Refused {
+                            name: call.name.clone(),
+                            reason: outcome.text.clone(),
+                        });
+                    } else {
+                        events.push(EventKind::Tool {
+                            name: call.name.clone(),
+                            ok: outcome.ok,
+                        });
+                    }
                 }
                 agent.spend.denied += refused;
                 for (call, outcome) in &results {
@@ -1301,10 +1330,17 @@ async fn apply(ctx: SystemContext, outcome: Outcome) -> bool {
                     return false;
                 }
                 for (call, outcome) in &results {
-                    events.push(EventKind::Tool {
-                        name: call.name.clone(),
-                        ok: outcome.ok,
-                    });
+                    if outcome.is_refused() {
+                        events.push(EventKind::Refused {
+                            name: call.name.clone(),
+                            reason: outcome.text.clone(),
+                        });
+                    } else {
+                        events.push(EventKind::Tool {
+                            name: call.name.clone(),
+                            ok: outcome.ok,
+                        });
+                    }
                 }
                 agent.spend.denied += refused;
                 for (call, outcome) in &results {
@@ -1327,7 +1363,7 @@ async fn apply(ctx: SystemContext, outcome: Outcome) -> bool {
                 if error.kind() == "provider" {
                     events.push(EventKind::Model {
                         provider: provider.clone(),
-                        model: String::new(),
+                        model: agent.model.clone().unwrap_or(default_model),
                         input_tokens: 0,
                         output_tokens: 0,
                         failed: true,
@@ -1369,8 +1405,11 @@ fn model_event(provider: &str, response: &GenerationResponse, failed: bool) -> E
 /// 才在写锁下写回。
 async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) {
     let service = LlmService::read(ctx).await;
-    let (journal, snapshots): (Option<Journal>, Vec<(Entity, usize, String, ConversationWindow)>) =
-        ctx.with_world(|world| {
+    let (journal, snapshots): (
+        Option<Journal>,
+        Vec<(Entity, usize, String, ConversationWindow, Option<LlmService>)>,
+    ) = ctx
+        .with_world(|world| {
             let journal = world.resource::<Journal>().cloned();
             let snapshots = world
                 .query::<(Entity, &ReactAgent)>()
@@ -1384,6 +1423,7 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
                         agent.spend.turns,
                         agent.name().to_string(),
                         agent.conversation.clone(),
+                        agent.service.clone().or_else(|| service.clone()),
                     )
                 })
                 .collect();
@@ -1397,8 +1437,7 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
     // 使录制的折叠回放进正确的窗口，即便多个智能体在同一次激活中
     // 折叠相同的转录。
     let folded = futures::future::join_all(snapshots.into_iter().map(
-        |(entity, turn, name, mut window)| {
-            let service = service.clone();
+        |(entity, turn, name, mut window, service)| {
             let journal = journal.clone();
             async move {
                 let report = crate::memory::FoldReport::new();
@@ -1415,23 +1454,24 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
                     None => Box::new(HeuristicSummariser::new(6, 160)),
                 };
                 let result = window.fold(summariser.as_ref(), keep_last).await;
-                (entity, turn, window, result, report.take())
+                (entity, turn, window, result, report.take(), service)
             }
         },
     ))
     .await;
     ctx.with_world_mut(|world| {
-        let (provider, model) = LlmService::from_world(world)
-            .map(|service| (service.provider_id(), service.model()))
-            .unwrap_or_default();
         let mut events = Vec::new();
-        for (entity, turn, window, result, call) in folded {
+        for (entity, turn, window, result, call, service) in folded {
             // 折叠的模型调用无论成败都记一条 Observer 事件：回退启发式后
-            // 折叠仍成功，故据调用报告而非折叠结果计量。
+            // 折叠仍成功，故据调用报告而非折叠结果计量。归因到该智能体
+            // 实际使用的提供方，而非世界默认。
             if let Some(call) = call {
+                let (provider, model) = service
+                    .map(|service| (service.provider_id(), service.model()))
+                    .unwrap_or_default();
                 events.push(EventKind::Model {
-                    provider: provider.clone(),
-                    model: model.clone(),
+                    provider,
+                    model,
                     input_tokens: call.input_tokens,
                     output_tokens: call.output_tokens,
                     failed: call.failed,
@@ -1568,26 +1608,31 @@ async fn stop_agents(ctx: &SystemContext) {
 
 /// 失败重名的开放智能体。名字是关联标识（名字+轮）的一半，重名会让
 /// 两个智能体共享日志键，静默复用彼此的模型响应与工具结果——记录时
-/// 的冲突守卫只兜得住并发覆盖，兜不住顺序复用。按实体顺序保留每个
-/// 名字的首个拥有者、失败后来者，使冲突在任何模型调用之前就响亮可见。
+/// 的冲突守卫只兜得住并发覆盖，兜不住顺序复用。名字所有权按所有
+/// lingering 实体判定（含终态者）：一个跑完仍留在世界中的智能体依旧
+/// 拥有其名字与日志键，复用它的新智能体会经 lookup_tools 静默接管旧
+/// 轨迹。按实体顺序保留每个名字的首个拥有者，只失败开放的后来者
+/// （终态者不被二次失败），使冲突在任何模型调用之前就响亮可见。
+/// 合法复用须先 despawn 旧实体或改名。
 async fn reject_duplicate_names(ctx: &SystemContext) {
     use std::collections::hash_map::Entry;
     ctx.with_world_mut(|world| {
-        let mut open: Vec<(Entity, String)> = world
+        let mut agents: Vec<(Entity, String)> = world
             .query::<(Entity, &ReactAgent)>()
-            .filter(|(_, agent)| agent.status.is_open())
             .map(|(entity, agent)| (entity, agent.name().to_string()))
             .collect();
-        open.sort_by_key(|(entity, _)| *entity);
+        agents.sort_by_key(|(entity, _)| *entity);
         let mut owners: HashMap<String, Entity> = HashMap::new();
         let mut events = Vec::new();
-        for (entity, name) in open {
+        for (entity, name) in agents {
             match owners.entry(name.clone()) {
                 Entry::Vacant(slot) => {
                     slot.insert(entity);
                 }
                 Entry::Occupied(_) => {
-                    if let Some(agent) = world.get_mut::<ReactAgent>(entity) {
+                    if let Some(agent) = world.get_mut::<ReactAgent>(entity)
+                        && agent.status.is_open()
+                    {
                         agent.fail(&AgentError::config(format!(
                             "duplicate agent name `{name}`: agent names must be unique, \
                              so their correlation keys do not collide and share a journal"
@@ -2493,6 +2538,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_name_owned_by_a_finished_agent_still_blocks_reuse() {
+        use crate::replay::Journal;
+
+        // 一个已完成但仍留在世界中的智能体仍拥有其名字与日志键。
+        // 复用该名字的新智能体会经 lookup_tools 静默复用旧轨迹，故
+        // 名字所有权须按所有 lingering 实体判定，而非只看开放者。
+        let mut world = World::new();
+        world.insert_resource(ToolRegistry::new());
+        world.insert_resource(Journal::new());
+        world.insert_resource(LlmService::from_provider(MockProvider::text("done")));
+        let first = world.spawn_with((ReactAgent::new("worker", "be brief").ask("go"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the first run");
+        {
+            let world = ctx.world.read().await;
+            assert_eq!(
+                world.get::<ReactAgent>(first).unwrap().status(),
+                AgentStatus::Finished
+            );
+        }
+
+        let second = {
+            let mut world = ctx.world.write().await;
+            world.spawn_with((ReactAgent::new("worker", "be brief").ask("go"),))
+        };
+        React::new().run(ctx.clone()).await.expect("the second run");
+
+        let world = ctx.world.read().await;
+        let duplicate = world.get::<ReactAgent>(second).unwrap();
+        assert_eq!(
+            duplicate.status(),
+            AgentStatus::Failed,
+            "reuse against a lingering finished agent must fail loudly"
+        );
+        assert!(
+            duplicate.error().unwrap_or("").contains("duplicate"),
+            "{:?}",
+            duplicate.error()
+        );
+        assert_eq!(
+            world.get::<ReactAgent>(first).unwrap().status(),
+            AgentStatus::Finished,
+            "the original owner is untouched"
+        );
+    }
+
+    #[tokio::test]
     async fn a_huge_tool_result_is_capped_in_the_prompt() {
         use std::sync::Mutex;
         use xihe_llm::{LlmError, Provider, Role};
@@ -2787,6 +2879,186 @@ mod tests {
         assert_eq!(agent.answer(), Some("I will not deploy"));
         assert!(agent.conversation().render().contains("frozen for the weekend"));
         assert_eq!(agent.spend().denied, 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_tool_is_not_counted_as_a_tool_failure() {
+        // 人工拒绝是策略拦截，不是工具故障：它根本没运行，故不该进
+        // tool_calls/tool_failures，而应作为可审计的拒绝单独计数。
+        let mut registry = ToolRegistry::new();
+        registry.register(
+            FnTool::new("deploy", "ship it", |_ctx, _call| ToolOutcome::text("nope"))
+                .requiring_approval(),
+        );
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(Observer::new());
+        world.insert_resource(LlmService::from_provider(MockProvider::with_script([
+            Reply::tool("deploy", json!({})),
+            Reply::text("I will not deploy"),
+        ])));
+        world.spawn_with((ReactAgent::new("ops", "ask first").ask("ship"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new()
+            .with_approver(AlwaysReject::new("frozen for the weekend"))
+            .run(ctx.clone())
+            .await
+            .expect("runs");
+
+        let observer = {
+            let world = ctx.world.read().await;
+            world.resource::<Observer>().cloned().expect("an observer")
+        };
+        let snapshot = observer.snapshot();
+        assert_eq!(
+            snapshot.tool_failures, 0,
+            "a refusal is not a tool failure: {}",
+            observer.render()
+        );
+        assert_eq!(
+            snapshot.tool_calls, 0,
+            "a refused tool never ran: {}",
+            observer.render()
+        );
+        assert_eq!(
+            snapshot.tool_refusals, 1,
+            "the human refusal is counted separately: {}",
+            observer.render()
+        );
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Refused { name, .. } if name == "deploy"
+            )),
+            "the refusal is visible in the log: {}",
+            observer.render()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_model_call_records_the_requested_model() {
+        use xihe_llm::{LlmError, Provider};
+
+        // 失败的模型调用此前记空模型名，无法归因到具体模型。
+        // 有效模型 = 智能体覆盖优先，否则服务默认；这里覆盖须胜出。
+        struct FailingProvider;
+
+        #[async_trait::async_trait]
+        impl Provider for FailingProvider {
+            fn id(&self) -> &str {
+                "failing"
+            }
+            fn default_model(&self) -> &str {
+                "provider-default"
+            }
+            async fn generate(
+                &self,
+                _request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                Err(LlmError::decode("the endpoint returned garbage"))
+            }
+        }
+
+        let mut world = World::new();
+        world.insert_resource(ToolRegistry::new());
+        world.insert_resource(Observer::new());
+        world.insert_resource(LlmService::from_provider(FailingProvider));
+        world.spawn_with((
+            ReactAgent::new("scribe", "be brief")
+                .with_model("specific-model")
+                .ask("go"),
+        ));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the run");
+
+        let agent = only_agent(&ctx).await;
+        assert_eq!(agent.status(), AgentStatus::Failed);
+        let observer = {
+            let world = ctx.world.read().await;
+            world.resource::<Observer>().cloned().expect("an observer")
+        };
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Model { failed: true, model, .. } if model == "specific-model"
+            )),
+            "a failed call must name the requested model, not an empty string: {}",
+            observer.render()
+        );
+    }
+
+    #[tokio::test]
+    async fn agents_can_carry_their_own_provider() {
+        // 基础架构：每个智能体可自带提供方，世界默认只是回退。
+        // 两个 agent 绑不同脚本/模型的提供方，各自的答案与 Observer
+        // 归因须来自各自的提供方，而非世界默认。
+        let mut world = World::new();
+        world.insert_resource(ToolRegistry::new());
+        world.insert_resource(Observer::new());
+        world.insert_resource(LlmService::from_provider(
+            MockProvider::text("default answer").with_model("default-model"),
+        ));
+        world.spawn_with((
+            ReactAgent::new("alpha", "be brief")
+                .with_service(LlmService::from_provider(
+                    MockProvider::text("alpha answer").with_model("alpha-model"),
+                ))
+                .ask("go"),
+        ));
+        world.spawn_with((
+            ReactAgent::new("beta", "be brief")
+                .with_service(LlmService::from_provider(
+                    MockProvider::text("beta answer").with_model("beta-model"),
+                ))
+                .ask("go"),
+        ));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the run");
+
+        let world = ctx.world.read().await;
+        let answers: Vec<(String, String)> = world
+            .query::<(Entity, &ReactAgent)>()
+            .map(|(_, agent)| {
+                (
+                    agent.name().to_string(),
+                    agent.answer().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        assert!(
+            answers.contains(&("alpha".to_string(), "alpha answer".to_string())),
+            "alpha must answer from its own provider: {answers:?}"
+        );
+        assert!(
+            answers.contains(&("beta".to_string(), "beta answer".to_string())),
+            "beta must answer from its own provider: {answers:?}"
+        );
+
+        let observer = world.resource::<Observer>().unwrap();
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Model { model, failed: false, .. } if model == "alpha-model"
+            )),
+            "alpha's call must be attributed to alpha-model: {}",
+            observer.render()
+        );
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Model { model, failed: false, .. } if model == "beta-model"
+            )),
+            "beta's call must be attributed to beta-model: {}",
+            observer.render()
+        );
+        assert!(
+            !observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Model { model, .. } if model == "default-model"
+            )),
+            "the world default must not be used when both agents carry their own: {}",
+            observer.render()
+        );
     }
 
     #[tokio::test]

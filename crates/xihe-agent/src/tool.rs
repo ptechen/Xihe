@@ -166,6 +166,26 @@ impl ToolOutcome {
             .and_then(Value::as_bool)
             .unwrap_or(false)
     }
+
+    /// 运行前被策略拦截而未执行的调用：预算耗尽、未知工具、
+    /// 人工拒绝或参数校验不过。文本与 [`ToolOutcome::error`] 一样
+    /// 发回给模型，但 payload 标记使观察器能把它与运行后的失败区分。
+    pub fn refused(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            ok: false,
+            payload: json!({ "refused": true, "detail": text }),
+            text,
+        }
+    }
+
+    /// 当调用被策略拦截而非运行时为真。
+    pub fn is_refused(&self) -> bool {
+        self.payload
+            .get("refused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 /// 模型可请求的一项能力。

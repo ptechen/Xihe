@@ -68,6 +68,7 @@ fn report(app: &App, roster: &Roster) {
     }
     if let Some(observer) = world.resource::<Observer>() {
         println!("{}", observer.snapshot());
+        println!("{}", observer.render());
     }
 }
 
