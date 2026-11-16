@@ -598,6 +598,7 @@ impl System for React {
             update_work(&ctx, &self.name).await;
             return Ok(());
         }
+        reject_duplicate_names(&ctx).await;
         if self.fold_threshold > 0 {
             fold_overlong(&ctx, self.fold_threshold, self.keep_last).await;
         }
@@ -897,8 +898,13 @@ impl Generation {
                 }
             }
         };
-        if let Some(journal) = &self.journal {
-            journal.record(&self.request, response.as_ref());
+        if let Some(journal) = &self.journal
+            && let Err(error) = journal.record(&self.request, response.as_ref())
+        {
+            return Outcome::Failed {
+                entity: self.entity,
+                error,
+            };
         }
         if response.tool_calls.is_empty() {
             return self.settle(response);
@@ -932,8 +938,12 @@ impl Generation {
         .await;
         if parked.is_none()
             && let Some(journal) = &self.journal
+            && let Err(error) = journal.record_tools(&self.request, results.clone(), refused)
         {
-            journal.record_tools(&self.request, results.clone(), refused);
+            return Outcome::Failed {
+                entity: self.entity,
+                error,
+            };
         }
         if let Some(parked) = &parked
             && let Some(journal) = &self.journal
@@ -1065,7 +1075,14 @@ impl Resume {
                     done,
                     total_refused,
                 ),
-                None => journal.record_tools(request, done, total_refused),
+                None => {
+                    if let Err(error) = journal.record_tools(request, done, total_refused) {
+                        return Outcome::Failed {
+                            entity: self.entity,
+                            error,
+                        };
+                    }
+                }
             }
         }
         Outcome::Observed {
@@ -1384,10 +1401,12 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
             let service = service.clone();
             let journal = journal.clone();
             async move {
+                let report = crate::memory::FoldReport::new();
                 let summariser: Box<dyn Summariser> = match &service {
                     Some(service) => {
                         let mut chat = crate::memory::ChatSummariser::new(service.shared())
-                            .with_correlation(name, window.fold_count());
+                            .with_correlation(name, window.fold_count())
+                            .with_report(report.clone());
                         if let Some(journal) = journal {
                             chat = chat.with_journal(journal);
                         }
@@ -1396,13 +1415,28 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
                     None => Box::new(HeuristicSummariser::new(6, 160)),
                 };
                 let result = window.fold(summariser.as_ref(), keep_last).await;
-                (entity, turn, window, result)
+                (entity, turn, window, result, report.take())
             }
         },
     ))
     .await;
     ctx.with_world_mut(|world| {
-        for (entity, turn, window, result) in folded {
+        let (provider, model) = LlmService::from_world(world)
+            .map(|service| (service.provider_id(), service.model()))
+            .unwrap_or_default();
+        let mut events = Vec::new();
+        for (entity, turn, window, result, call) in folded {
+            // 折叠的模型调用无论成败都记一条 Observer 事件：回退启发式后
+            // 折叠仍成功，故据调用报告而非折叠结果计量。
+            if let Some(call) = call {
+                events.push(EventKind::Model {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    input_tokens: call.input_tokens,
+                    output_tokens: call.output_tokens,
+                    failed: call.failed,
+                });
+            }
             let Ok(summary) = result else {
                 tracing::warn!(%entity, "a conversation fold failed");
                 continue;
@@ -1416,6 +1450,11 @@ async fn fold_overlong(ctx: &SystemContext, threshold: usize, keep_last: usize) 
             agent.conversation = window;
             if summary.is_some() {
                 tracing::debug!(%entity, "folded a long conversation");
+            }
+        }
+        if let Some(observer) = world.resource_mut::<Observer>() {
+            for event in events {
+                observer.record(event);
             }
         }
     })
@@ -1516,6 +1555,49 @@ async fn stop_agents(ctx: &SystemContext) {
                     name: agent.name().to_string(),
                     status: agent.status.as_str().to_string(),
                 });
+            }
+        }
+        if let Some(observer) = world.resource_mut::<Observer>() {
+            for event in events {
+                observer.record(event);
+            }
+        }
+    })
+    .await;
+}
+
+/// 失败重名的开放智能体。名字是关联标识（名字+轮）的一半，重名会让
+/// 两个智能体共享日志键，静默复用彼此的模型响应与工具结果——记录时
+/// 的冲突守卫只兜得住并发覆盖，兜不住顺序复用。按实体顺序保留每个
+/// 名字的首个拥有者、失败后来者，使冲突在任何模型调用之前就响亮可见。
+async fn reject_duplicate_names(ctx: &SystemContext) {
+    use std::collections::hash_map::Entry;
+    ctx.with_world_mut(|world| {
+        let mut open: Vec<(Entity, String)> = world
+            .query::<(Entity, &ReactAgent)>()
+            .filter(|(_, agent)| agent.status.is_open())
+            .map(|(entity, agent)| (entity, agent.name().to_string()))
+            .collect();
+        open.sort_by_key(|(entity, _)| *entity);
+        let mut owners: HashMap<String, Entity> = HashMap::new();
+        let mut events = Vec::new();
+        for (entity, name) in open {
+            match owners.entry(name.clone()) {
+                Entry::Vacant(slot) => {
+                    slot.insert(entity);
+                }
+                Entry::Occupied(_) => {
+                    if let Some(agent) = world.get_mut::<ReactAgent>(entity) {
+                        agent.fail(&AgentError::config(format!(
+                            "duplicate agent name `{name}`: agent names must be unique, \
+                             so their correlation keys do not collide and share a journal"
+                        )));
+                        events.push(EventKind::Agent {
+                            name: agent.name().to_string(),
+                            status: agent.status.as_str().to_string(),
+                        });
+                    }
+                }
             }
         }
         if let Some(observer) = world.resource_mut::<Observer>() {
@@ -2181,6 +2263,233 @@ mod tests {
             3,
             "replay must not re-run the tools"
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_fold_is_visible_in_the_observer() {
+        use std::sync::Mutex;
+        use xihe_llm::{LlmError, Provider};
+
+        // 折叠调用（无工具）以一个非重试错误失败，迫使 ChatSummariser
+        // 回退启发式；生成调用（有工具）以工具轮然后回答作答，使智能体
+        // 仍能完成。被容纳的折叠降级必须在 Observer 可见，而非仅 tracing。
+        struct FailingFoldProvider {
+            generations: Mutex<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for FailingFoldProvider {
+            fn id(&self) -> &str {
+                "failing-fold"
+            }
+            fn default_model(&self) -> &str {
+                "failing-fold"
+            }
+            async fn generate(
+                &self,
+                request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                if request.tools.is_empty() {
+                    return Err(LlmError::decode("the summariser endpoint returned garbage"));
+                }
+                let mut calls = self.generations.lock().unwrap();
+                let n = *calls;
+                *calls += 1;
+                Ok(if n < 3 {
+                    GenerationResponse::default().with_tool_calls(vec![ToolCall::new(
+                        format!("c{n}"),
+                        "echo",
+                        json!({"text": format!("t{n}")}),
+                    )])
+                } else {
+                    GenerationResponse::text("all done")
+                })
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(
+            FnTool::new("echo", "echo it", |_ctx, call| {
+                ToolOutcome::text(call.string_argument("text").unwrap_or("").to_string())
+            })
+            .with_required_string("text", "the text to echo"),
+        );
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(Observer::new());
+        world.insert_resource(LlmService::from_provider(FailingFoldProvider {
+            generations: Mutex::new(0),
+        }));
+        world.spawn_with((ReactAgent::new("scribe", "be brief").ask("go"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new()
+            .with_fold(3, 2)
+            .run(ctx.clone())
+            .await
+            .expect("the run");
+
+        let agent = only_agent(&ctx).await;
+        assert_eq!(
+            agent.status(),
+            AgentStatus::Finished,
+            "the heuristic fallback keeps the agent working: {:?}",
+            agent.error()
+        );
+        assert!(
+            agent.conversation().fold_count() > 0,
+            "the conversation must actually have folded"
+        );
+
+        let observer = {
+            let world = ctx.world.read().await;
+            world.resource::<Observer>().cloned().expect("an observer")
+        };
+        assert!(
+            observer.snapshot().model_failures >= 1,
+            "a failed fold model call must reach the Observer, not just tracing: {}",
+            observer.render()
+        );
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Model { provider, failed: true, .. } if provider == "failing-fold"
+            )),
+            "the degraded fold is recorded as a model failure: {}",
+            observer.render()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_fold_is_counted_in_the_observer() {
+        use std::sync::Mutex;
+        use xihe_llm::{LlmError, Provider, TokenUsage};
+
+        // 折叠调用（无工具）以带 token 计量的摘要作答；生成调用（有工具）
+        // 以几个工具轮然后回答作答。成功的折叠也是一次模型调用，必须像
+        // 生成轮一样计入 Observer 的 model_calls 与 token 总量，而非被漏计。
+        struct AccountingFoldProvider {
+            generations: Mutex<usize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for AccountingFoldProvider {
+            fn id(&self) -> &str {
+                "accounting-fold"
+            }
+            fn default_model(&self) -> &str {
+                "accounting-fold"
+            }
+            async fn generate(
+                &self,
+                request: &GenerationRequest,
+            ) -> Result<GenerationResponse, LlmError> {
+                if request.tools.is_empty() {
+                    return Ok(GenerationResponse::text("a folded summary of earlier turns")
+                        .with_usage(TokenUsage::new(100, 20)));
+                }
+                let mut calls = self.generations.lock().unwrap();
+                let n = *calls;
+                *calls += 1;
+                Ok(if n < 3 {
+                    GenerationResponse::default().with_tool_calls(vec![ToolCall::new(
+                        format!("c{n}"),
+                        "echo",
+                        json!({"text": format!("t{n}")}),
+                    )])
+                } else {
+                    GenerationResponse::text("all done")
+                })
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(
+            FnTool::new("echo", "echo it", |_ctx, call| {
+                ToolOutcome::text(call.string_argument("text").unwrap_or("").to_string())
+            })
+            .with_required_string("text", "the text to echo"),
+        );
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+        world.insert_resource(Observer::new());
+        world.insert_resource(LlmService::from_provider(AccountingFoldProvider {
+            generations: Mutex::new(0),
+        }));
+        world.spawn_with((ReactAgent::new("scribe", "be brief").ask("go"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new()
+            .with_fold(3, 2)
+            .run(ctx.clone())
+            .await
+            .expect("the run");
+
+        let agent = only_agent(&ctx).await;
+        assert_eq!(agent.status(), AgentStatus::Finished, "{:?}", agent.error());
+        assert!(
+            agent.conversation().fold_count() > 0,
+            "the conversation must actually have folded"
+        );
+
+        let observer = {
+            let world = ctx.world.read().await;
+            world.resource::<Observer>().cloned().expect("an observer")
+        };
+        assert!(
+            observer.events().iter().any(|event| matches!(
+                &event.kind,
+                EventKind::Model { input_tokens: 100, output_tokens: 20, failed: false, .. }
+            )),
+            "a successful fold must be counted with its token usage: {}",
+            observer.render()
+        );
+        assert!(
+            observer.snapshot().model_calls >= 5,
+            "four generation turns plus at least one fold must all be counted: {}",
+            observer.render()
+        );
+        assert_eq!(observer.snapshot().model_failures, 0, "{}", observer.render());
+    }
+
+    #[tokio::test]
+    async fn duplicate_agent_names_are_rejected_before_they_share_a_journal() {
+        use crate::replay::Journal;
+
+        // 名字是关联标识（名字+轮）的一半。两个同名智能体共享日志键，
+        // 会静默复用彼此的模型响应与工具结果。预防性守卫必须在任何
+        // 模型调用之前就失败后来者，而非靠记录时检测兜底。
+        let mut world = World::new();
+        world.insert_resource(ToolRegistry::new());
+        world.insert_resource(Journal::new());
+        world.insert_resource(LlmService::from_provider(MockProvider::text("done")));
+        world.spawn_with((ReactAgent::new("worker", "be brief").ask("go"),));
+        world.spawn_with((ReactAgent::new("worker", "be brief").ask("go"),));
+        let ctx = SystemContext::new(WorldHandle::new(world));
+        React::new().run(ctx.clone()).await.expect("the loop runs");
+
+        let world = ctx.world.read().await;
+        let agents: Vec<ReactAgent> = world
+            .query::<(Entity, &ReactAgent)>()
+            .map(|(_, agent)| agent.clone())
+            .collect();
+        let failed = agents
+            .iter()
+            .filter(|agent| agent.status() == AgentStatus::Failed)
+            .count();
+        let finished = agents
+            .iter()
+            .filter(|agent| agent.status() == AgentStatus::Finished)
+            .count();
+        assert_eq!(failed, 1, "the later duplicate must fail loudly");
+        assert_eq!(finished, 1, "the first owner keeps the name and finishes");
+        let duplicate = agents
+            .iter()
+            .find(|agent| agent.status() == AgentStatus::Failed)
+            .unwrap();
+        let error = duplicate.error().unwrap_or("");
+        assert!(error.contains("duplicate"), "must name the problem: {error}");
+        assert!(error.contains("worker"), "must name the agent: {error}");
     }
 
     #[tokio::test]

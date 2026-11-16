@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use xihe_llm::{GenerationRequest, GenerationResponse, LlmError, Provider, ToolCall};
 
+use crate::error::AgentError;
 use crate::tool::ToolOutcome;
 
 /// 模型响应与工具结果的共享日志，存为世界资源。
@@ -36,7 +37,7 @@ pub struct Journal {
 }
 
 /// 跟随一次模型响应的工具结果。
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct ToolRecord {
     results: Vec<(ToolCall, ToolOutcome)>,
     refused: usize,
@@ -69,11 +70,25 @@ impl Journal {
     }
 
     /// 以 `request` 的指纹为键存储 `response`。
-    pub fn record(&self, request: &GenerationRequest, response: &GenerationResponse) {
-        self.entries
-            .lock()
-            .expect("journal lock")
-            .insert(fingerprint(request), response.clone());
+    ///
+    /// 同一指纹已录有*不同*响应时返回错误而非覆盖：两个智能体共享
+    /// 名字会让其关联标识（名字+轮）相撞，使非确定性模型的两次作答
+    /// 落到同一个键上。无声覆盖会让回放静默发散，故冲突在录制时
+    /// 就响亮失败。重复录入*相同*响应是幂等的。
+    pub fn record(
+        &self,
+        request: &GenerationRequest,
+        response: &GenerationResponse,
+    ) -> Result<(), AgentError> {
+        let key = fingerprint(request);
+        let mut entries = self.entries.lock().expect("journal lock");
+        if let Some(existing) = entries.get(&key)
+            && existing != response
+        {
+            return Err(collision_error(request, "response"));
+        }
+        entries.insert(key, response.clone());
+        Ok(())
     }
 
     /// 为 `request` 录制的响应（若有）。
@@ -86,16 +101,27 @@ impl Journal {
     }
 
     /// 存储跟随 `request` 的工具结果。
+    ///
+    /// 与 [`Journal::record`] 同一守卫：同一指纹已录有*不同*工具结果时
+    /// 返回错误而非覆盖。确定性模型下两个同名智能体的响应逐字相同、
+    /// 绕过响应守卫，但带副作用的工具仍可能产出不同结果——无声覆盖会
+    /// 让回放把一个智能体的结果喂给两者。重复录入*相同*结果幂等。
     pub fn record_tools(
         &self,
         request: &GenerationRequest,
         results: Vec<(ToolCall, ToolOutcome)>,
         refused: usize,
-    ) {
-        self.tools
-            .lock()
-            .expect("journal lock")
-            .insert(fingerprint(request), ToolRecord { results, refused });
+    ) -> Result<(), AgentError> {
+        let key = fingerprint(request);
+        let record = ToolRecord { results, refused };
+        let mut tools = self.tools.lock().expect("journal lock");
+        if let Some(existing) = tools.get(&key)
+            && existing != &record
+        {
+            return Err(collision_error(request, "tool result"));
+        }
+        tools.insert(key, record);
+        Ok(())
     }
 
     /// 为 `request` 录制的工具结果（若有）。
@@ -223,6 +249,20 @@ fn fingerprint(request: &GenerationRequest) -> String {
     .to_string()
 }
 
+/// 指纹冲突的错误，带上肇事关联标识使操作员一眼看到哪个智能体撞了键。
+fn collision_error(request: &GenerationRequest, what: &str) -> AgentError {
+    let who = request
+        .correlation
+        .as_ref()
+        .map(|c| format!("agent `{}` turn {}", c.agent, c.turn))
+        .unwrap_or_else(|| "an uncorrelated request".to_string());
+    AgentError::config(format!(
+        "journal fingerprint collision: a different {what} is already recorded for {who}; \
+         two agents likely share a name, so their correlation keys collide and replay would \
+         silently diverge"
+    ))
+}
+
 /// 从 [`Journal`] 而非实时模型作答的提供方。
 ///
 /// 没有已录制响应的请求是一个错误，而非静默回退：
@@ -268,7 +308,9 @@ mod tests {
     fn a_cloned_journal_shares_one_log() {
         let journal = Journal::new();
         let other = journal.clone();
-        journal.record(&request("hi"), &GenerationResponse::text("hello"));
+        journal
+            .record(&request("hi"), &GenerationResponse::text("hello"))
+            .expect("record");
         assert_eq!(other.len(), 1);
         assert_eq!(
             other.lookup(&request("hi")).expect("recorded").content,
@@ -312,6 +354,85 @@ mod tests {
     }
 
     #[test]
+    fn record_rejects_a_conflicting_duplicate_fingerprint() {
+        let journal = Journal::new();
+        let req = request("hi").with_correlation("worker", 0);
+        journal
+            .record(&req, &GenerationResponse::text("alpha"))
+            .expect("first record");
+        let conflict = journal.record(&req, &GenerationResponse::text("beta"));
+        assert!(conflict.is_err(), "a different response under one key must fail");
+        assert!(
+            conflict.unwrap_err().to_string().contains("collision"),
+            "the error must name the collision"
+        );
+        assert_eq!(
+            journal.lookup(&req).expect("recorded").content,
+            "alpha",
+            "the first recording must survive, not be overwritten"
+        );
+    }
+
+    #[test]
+    fn record_is_idempotent_for_an_identical_response() {
+        let journal = Journal::new();
+        let req = request("hi").with_correlation("worker", 0);
+        let response = GenerationResponse::text("alpha");
+        journal.record(&req, &response).expect("first record");
+        journal.record(&req, &response).expect("identical re-record");
+        assert_eq!(journal.len(), 1);
+    }
+
+    #[test]
+    fn record_tools_rejects_a_conflicting_duplicate_fingerprint() {
+        let journal = Journal::new();
+        let req = request("hi").with_correlation("worker", 0);
+        let call = ToolCall::new("c1", "deploy", serde_json::json!({}));
+        journal
+            .record_tools(&req, vec![(call.clone(), ToolOutcome::text("a"))], 0)
+            .expect("first record");
+        let conflict = journal.record_tools(&req, vec![(call, ToolOutcome::text("b"))], 0);
+        assert!(
+            conflict.is_err(),
+            "different tool results under one key must fail"
+        );
+        assert!(conflict.unwrap_err().to_string().contains("collision"));
+        let (got, _) = journal.lookup_tools(&req).expect("recorded");
+        assert_eq!(got[0].1.text, "a", "the first recording must survive");
+    }
+
+    #[test]
+    fn record_tools_is_idempotent_for_identical_results() {
+        let journal = Journal::new();
+        let req = request("hi").with_correlation("worker", 0);
+        let results = vec![(
+            ToolCall::new("c1", "deploy", serde_json::json!({})),
+            ToolOutcome::text("a"),
+        )];
+        journal
+            .record_tools(&req, results.clone(), 0)
+            .expect("first record");
+        journal
+            .record_tools(&req, results, 0)
+            .expect("identical re-record");
+    }
+
+    #[test]
+    fn a_collision_error_names_the_colliding_agent() {
+        let journal = Journal::new();
+        let req = request("hi").with_correlation("worker", 3);
+        journal
+            .record(&req, &GenerationResponse::text("alpha"))
+            .expect("first record");
+        let error = journal
+            .record(&req, &GenerationResponse::text("beta"))
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("worker"), "must name the agent: {message}");
+        assert!(message.contains("turn 3"), "must name the turn: {message}");
+    }
+
+    #[test]
     fn tool_results_round_trip_under_their_request_key() {
         let journal = Journal::new();
         let req = request("hi").with_correlation("ops", 0);
@@ -320,7 +441,7 @@ mod tests {
             ToolCall::new("c1", "deploy", serde_json::json!({})),
             ToolOutcome::ok(serde_json::json!({"shipped": true}), "shipped"),
         )];
-        journal.record_tools(&req, results, 1);
+        journal.record_tools(&req, results, 1).expect("record tools");
         let (got, refused) = journal.lookup_tools(&req).expect("recorded");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0.name, "deploy");
@@ -338,15 +459,19 @@ mod tests {
     fn a_journal_round_trips_through_bytes() {
         let journal = Journal::new();
         let req = request("hi").with_correlation("ops", 0);
-        journal.record(&req, &GenerationResponse::text("hello"));
-        journal.record_tools(
-            &req,
-            vec![(
-                ToolCall::new("c1", "deploy", serde_json::json!({})),
-                ToolOutcome::ok(serde_json::json!({"shipped": true}), "shipped"),
-            )],
-            1,
-        );
+        journal
+            .record(&req, &GenerationResponse::text("hello"))
+            .expect("record");
+        journal
+            .record_tools(
+                &req,
+                vec![(
+                    ToolCall::new("c1", "deploy", serde_json::json!({})),
+                    ToolOutcome::ok(serde_json::json!({"shipped": true}), "shipped"),
+                )],
+                1,
+            )
+            .expect("record tools");
 
         let bytes = journal.to_bytes().expect("serialize");
         let restored = Journal::from_bytes(&bytes).expect("deserialize");
@@ -362,7 +487,9 @@ mod tests {
     fn a_journal_round_trips_through_a_file() {
         let journal = Journal::new();
         let req = request("hi").with_correlation("ops", 0);
-        journal.record(&req, &GenerationResponse::text("hello"));
+        journal
+            .record(&req, &GenerationResponse::text("hello"))
+            .expect("record");
 
         let path =
             std::env::temp_dir().join(format!("xihe-journal-unit-{}.json", std::process::id()));
@@ -376,7 +503,9 @@ mod tests {
     #[tokio::test]
     async fn replay_answers_from_the_journal_and_fails_on_a_miss() {
         let journal = Journal::new();
-        journal.record(&request("hi"), &GenerationResponse::text("hello"));
+        journal
+            .record(&request("hi"), &GenerationResponse::text("hello"))
+            .expect("record");
         let provider = ReplayProvider::new(journal);
         assert_eq!(provider.id(), "replay");
         let answered = provider.generate(&request("hi")).await.expect("recorded");

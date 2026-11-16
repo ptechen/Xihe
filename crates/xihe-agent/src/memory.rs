@@ -11,13 +11,13 @@
 //!   可置于模型面前的一条系统消息。
 
 use std::fmt::{self, Debug, Formatter};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use xihe_core::{Entity, World};
 use xihe_llm::ChatClient;
 use xihe_memory::{
-    AgentMemory, ConversationWindow, MemoryQuery, MemoryResult, MemoryStore,
+    AgentMemory, ConversationWindow, MemoryError, MemoryQuery, MemoryResult, MemoryStore,
     ScoredRecord, Summariser,
 };
 use xihe_schedule::SystemContext;
@@ -97,6 +97,43 @@ pub async fn fold_window<S: Summariser + ?Sized>(
     window.fold(summariser, keep_last).await
 }
 
+/// 一次折叠模型调用的结果，供调用者记入 Observer。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FoldCall {
+    /// 提示词 token。
+    pub input_tokens: u64,
+    /// 补全 token。
+    pub output_tokens: u64,
+    /// 模型调用是否失败（失败时摘要回退启发式）。
+    pub failed: bool,
+}
+
+/// 摘要器与调用者共享的折叠调用报告。
+///
+/// 折叠即便在模型失败时仍会成功（启发式兜底），故调用者无法从折叠
+/// 结果看出这次模型调用的成败与计量；摘要器把它写入此报告，
+/// [`crate::React`] 取出后为每次折叠调用记一条 Observer 模型事件。
+#[derive(Clone, Default)]
+pub struct FoldReport {
+    call: Arc<Mutex<Option<FoldCall>>>,
+}
+
+impl FoldReport {
+    /// 一个空报告。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn set(&self, call: FoldCall) {
+        *self.call.lock().expect("fold report lock") = Some(call);
+    }
+
+    /// 取出最近一次折叠调用（若有），取出后清空。
+    pub fn take(&self) -> Option<FoldCall> {
+        self.call.lock().expect("fold report lock").take()
+    }
+}
+
 /// 用一个聊天模型做摘要。
 ///
 /// [`xihe_memory`] 中的启发式摘要器挑选它能打分的句子；
@@ -114,6 +151,7 @@ pub struct ChatSummariser {
     instructions: String,
     journal: Option<Journal>,
     correlation: Option<(String, usize)>,
+    report: Option<FoldReport>,
 }
 
 impl ChatSummariser {
@@ -129,6 +167,7 @@ impl ChatSummariser {
                 .to_string(),
             journal: None,
             correlation: None,
+            report: None,
         }
     }
 
@@ -161,6 +200,18 @@ impl ChatSummariser {
         self
     }
 
+    /// 把每次折叠模型调用的成败与 token 计量写入 `report`。
+    ///
+    /// 折叠本身即便在模型失败时仍会成功（启发式兜底），因此调用者无法
+    /// 从折叠结果看出这次模型调用；这个报告让 [`crate::React`] 能为每次
+    /// 折叠调用——无论成败——记一条 Observer 模型事件，而非只留在
+    /// tracing 日志里。
+    #[must_use]
+    pub fn with_report(mut self, report: FoldReport) -> Self {
+        self.report = Some(report);
+        self
+    }
+
     /// 此摘要器询问的模型。
     pub fn model(&self) -> String {
         self.client.model().to_string()
@@ -190,11 +241,20 @@ impl Summariser for ChatSummariser {
             match self.client.generate(&request).await {
                 Ok(response) => {
                     if let Some(journal) = &self.journal {
-                        journal.record(&request, &response);
+                        journal
+                            .record(&request, &response)
+                            .map_err(|error| MemoryError::config(error.to_string()))?;
                     }
                     response
                 }
                 Err(error) => {
+                    if let Some(report) = &self.report {
+                        report.set(FoldCall {
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            failed: true,
+                        });
+                    }
                     tracing::warn!(
                         reason = error.to_string(),
                         "the model could not summarise; falling back to sentence ranking"
@@ -203,6 +263,13 @@ impl Summariser for ChatSummariser {
                 }
             }
         };
+        if let Some(report) = &self.report {
+            report.set(FoldCall {
+                input_tokens: response.usage.prompt_tokens,
+                output_tokens: response.usage.completion_tokens,
+                failed: false,
+            });
+        }
         let text = response.content.trim().to_string();
         if text.is_empty() {
             return self.fallback.summarise(transcript).await;
@@ -337,6 +404,68 @@ mod tests {
             summary.contains("export"),
             "the heuristic kept the salient line, got {summary}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_model_call_reports_a_failed_fold() {
+        let report = FoldReport::new();
+        let client = Arc::new(ChatClient::from_provider(MockProvider::with_script([
+            Reply::fail(xihe_llm::LlmError::decode("the summariser returned garbage")),
+        ])));
+        let summariser = ChatSummariser::new(client).with_report(report.clone());
+        let summary = summariser
+            .summarise("user: the export refreshes nightly\nassistant: noted")
+            .await
+            .expect("the fallback answers");
+        assert!(!summary.is_empty(), "the heuristic still summarises");
+        let call = report.take().expect("a fold call was reported");
+        assert!(
+            call.failed,
+            "the model failure must be reported so the fold degradation is observable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_model_call_reports_usage() {
+        let report = FoldReport::new();
+        let client = Arc::new(ChatClient::from_provider(MockProvider::text("a good summary")));
+        let summariser = ChatSummariser::new(client).with_report(report.clone());
+        summariser
+            .summarise("user: hello\nassistant: hi")
+            .await
+            .expect("a summary");
+        let call = report.take().expect("a fold call was reported");
+        assert!(!call.failed, "a successful summariser call is not a degradation");
+        assert!(
+            call.output_tokens > 0,
+            "a successful fold must carry its token usage, not be undercounted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_summary_reports_a_successful_fold() {
+        let journal = Journal::new();
+        let transcript = "user: the export refreshes nightly\nassistant: noted";
+
+        let recorder = ChatSummariser::new(Arc::new(ChatClient::from_provider(
+            MockProvider::text("recorded summary"),
+        )))
+        .with_correlation("scribe", 0)
+        .with_journal(journal.clone());
+        recorder.summarise(transcript).await.expect("recorded");
+
+        // 回放命中必须胜过失败的提供方：不询问模型，也不误报降级。
+        let report = FoldReport::new();
+        let replayer = ChatSummariser::new(Arc::new(ChatClient::from_provider(
+            MockProvider::with_script([Reply::fail(xihe_llm::LlmError::decode("down"))]),
+        )))
+        .with_correlation("scribe", 0)
+        .with_journal(journal.clone())
+        .with_report(report.clone());
+        let summary = replayer.summarise(transcript).await.expect("replayed");
+        assert_eq!(summary, "recorded summary");
+        let call = report.take().expect("a replayed fold call was reported");
+        assert!(!call.failed, "a replay hit is not a model failure");
     }
 
     #[tokio::test]
