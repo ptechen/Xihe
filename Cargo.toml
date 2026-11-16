@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/xihe-ecs-agent",
     "crates/xihe-demo",
+    "crates/xihe-desktop",
 ]
 
 [workspace.package]
